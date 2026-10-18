@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.15)
+project(CivilRegistryTests CXX)
+add_executable(civil_policy_test test_policy.cpp)
+target_compile_features(civil_policy_test PRIVATE cxx_std_17)
+if(MSVC)
+target_compile_options(civil_policy_test PRIVATE /UNDEBUG /utf-8)
+endif()
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/TabardRefreshUnderTest.inc"
+ COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/GenerateTabardTest.py" "${CMAKE_CURRENT_BINARY_DIR}/TabardRefreshUnderTest.inc"
+ DEPENDS GenerateTabardTest.py ../../WoW/Source/Object/ObjectClient/Player_C.cpp)
+add_executable(civil_tabard_refresh_test test_tabard_refresh.cpp "${CMAKE_CURRENT_BINARY_DIR}/TabardRefreshUnderTest.inc")
+target_compile_features(civil_tabard_refresh_test PRIVATE cxx_std_17)
+target_include_directories(civil_tabard_refresh_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+if(MSVC)
+ target_compile_options(civil_tabard_refresh_test PRIVATE /UNDEBUG /utf-8)
+endif()

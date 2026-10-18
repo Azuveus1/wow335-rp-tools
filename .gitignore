@@ -1,0 +1,13 @@
+/local.json
+/build/
+/bin/
+/backups/
+__pycache__/
+*.pyc
+*.exe
+*.dll
+*.pdb
+*.mpq
+*.dbc
+*.conf
+.env*

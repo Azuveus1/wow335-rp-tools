@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(RPGreetingsTests CXX)
+add_executable(rp_greeting_test test_policy.cpp)
+target_compile_features(rp_greeting_test PRIVATE cxx_std_17)
+if(MSVC)
+ target_compile_options(rp_greeting_test PRIVATE /UNDEBUG /utf-8)
+endif()

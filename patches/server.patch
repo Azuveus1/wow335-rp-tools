@@ -1,0 +1,1050 @@
+diff --git a/src/common/Collision/Maps/MapDefines.h b/src/common/Collision/Maps/MapDefines.h
+index 1877d3eec1..1afcfd84b5 100644
+--- a/src/common/Collision/Maps/MapDefines.h
++++ b/src/common/Collision/Maps/MapDefines.h
+@@ -40,12 +40,7 @@ struct MmapTileHeader
+ 
+ // All padding fields must be handled and initialized to ensure mmaps_generator will produce binary-identical *.mmtile files
+ static_assert(sizeof(MmapTileHeader) == 20, "MmapTileHeader size is not correct, adjust the padding field size");
+-static_assert(sizeof(MmapTileHeader) == (sizeof(MmapTileHeader::mmapMagic) +
+-                                         sizeof(MmapTileHeader::dtVersion) +
+-                                         sizeof(MmapTileHeader::mmapVersion) +
+-                                         sizeof(MmapTileHeader::size) +
+-                                         sizeof(MmapTileHeader::usesLiquids) +
+-                                         sizeof(MmapTileHeader::padding)), "MmapTileHeader has uninitialized padding fields");
++static_assert(sizeof(MmapTileHeader) == (4 * sizeof(uint32) + sizeof(char) + sizeof(char[3])), "MmapTileHeader has uninitialized padding fields");
+ 
+ enum NavArea
+ {
+diff --git a/src/common/Collision/Models/GameObjectModel.cpp b/src/common/Collision/Models/GameObjectModel.cpp
+index 1b3bb2ff09..be9d9e15a9 100644
+--- a/src/common/Collision/Models/GameObjectModel.cpp
++++ b/src/common/Collision/Models/GameObjectModel.cpp
+@@ -126,7 +126,7 @@ bool GameObjectModel::initialize(std::unique_ptr<GameObjectModelOwnerBase> model
+     iScale = modelOwner->GetScale();
+     iInvScale = 1.f / iScale;
+ 
+-    G3D::Matrix3 iRotation = G3D::Matrix3::fromEulerAnglesZYX(modelOwner->GetOrientation(), 0, 0);
++    G3D::Matrix3 iRotation = modelOwner->GetRotation();
+     iInvRot = iRotation.inverse();
+     // transform bounding box:
+     mdl_box = AABox(mdl_box.low() * iScale, mdl_box.high() * iScale);
+@@ -246,7 +246,7 @@ bool GameObjectModel::UpdatePosition()
+ 
+     iPos = owner->GetPosition();
+ 
+-    G3D::Matrix3 iRotation = G3D::Matrix3::fromEulerAnglesZYX(owner->GetOrientation(), 0, 0);
++    G3D::Matrix3 iRotation = owner->GetRotation();
+     iInvRot = iRotation.inverse();
+     // transform bounding box:
+     mdl_box = AABox(mdl_box.low() * iScale, mdl_box.high() * iScale);
+diff --git a/src/common/Collision/Models/GameObjectModel.h b/src/common/Collision/Models/GameObjectModel.h
+index 46de9bec4c..89933bbb00 100644
+--- a/src/common/Collision/Models/GameObjectModel.h
++++ b/src/common/Collision/Models/GameObjectModel.h
+@@ -47,6 +47,7 @@ public:
+     virtual uint32 GetPhaseMask() const = 0;
+     virtual G3D::Vector3 GetPosition() const = 0;
+     virtual float GetOrientation() const = 0;
++    virtual G3D::Matrix3 GetRotation() const { return G3D::Matrix3::fromEulerAnglesZYX(GetOrientation(), 0, 0); }
+     virtual float GetScale() const = 0;
+     virtual void DebugVisualizeCorner(G3D::Vector3 const& /*corner*/) const = 0;
+ };
+diff --git a/src/server/game/AI/SmartScripts/SmartScript.cpp b/src/server/game/AI/SmartScripts/SmartScript.cpp
+index 2709ba65e2..cfb4e1eb62 100644
+--- a/src/server/game/AI/SmartScripts/SmartScript.cpp
++++ b/src/server/game/AI/SmartScripts/SmartScript.cpp
+@@ -16,6 +16,7 @@
+  */
+ 
+ #include "SmartScript.h"
++#include "GMTransportRoute.h"
+ #include "CellImpl.h"
+ #include "ChatTextBuilder.h"
+ #include "Containers.h"
+@@ -280,6 +281,7 @@ void SmartScript::ProcessAction(SmartScriptHolder& e, Unit* unit, uint32 var0, u
+     {
+         case SMART_ACTION_TALK:
+         {
++            if (GetBaseObject() && GetBaseObject()->GetTypeId() == TYPEID_GAMEOBJECT && GMTransport::SuppressTalk(GetBaseObject()->GetEntry(), e.entryOrGuid, e.source_type, e.event_id)) break;
+             Creature* talker = e.target.type == 0 ? me : nullptr;
+             Unit* talkTarget = nullptr;
+ 
+diff --git a/src/server/game/Chat/Chat.cpp b/src/server/game/Chat/Chat.cpp
+index 2208f696fd..f4f0ca9800 100644
+--- a/src/server/game/Chat/Chat.cpp
++++ b/src/server/game/Chat/Chat.cpp
+@@ -16,6 +16,7 @@
+  */
+ 
+ #include "Chat.h"
++#include "CommandPlayerNames.h"
+ #include "AccountMgr.h"
+ #include "CellImpl.h"
+ #include "CharacterCache.h"
+@@ -570,7 +571,19 @@ ObjectGuid::LowType ChatHandler::extractLowGuidFromLink(char* text, HighGuid& gu
+ std::string ChatHandler::extractPlayerNameFromLink(char* text)
+ {
+     // |color|Hplayer:name|h[name]|h|r
+-    char* name_str = extractKeyFromLink(text, "Hplayer");
++    char* name_str = nullptr;
++    auto prefix = RoleplayNames::CommandNamePrefix(text ? text : "", [](std::string name) {
++        return normalizePlayerName(name) && !sCharacterCache->GetCharacterGuidByName(name).IsEmpty();
++    });
++    if (prefix) {
++        // strtok owns the legacy command cursor. Use an internal delimiter at
++        // the name boundary so subsequent strtok(nullptr,...) reads arguments.
++        // This buffer is mutable already, as required by extractKeyFromLink.
++        if (text[prefix.end]) text[prefix.end]='\a';
++        name_str = strtok(text+prefix.begin, "\a");
++    } else {
++        name_str = extractKeyFromLink(text, "Hplayer");
++    }
+     if (!name_str)
+         return "";
+ 
+diff --git a/src/server/game/Entities/GameObject/GameObject.cpp b/src/server/game/Entities/GameObject/GameObject.cpp
+index 962efe036c..7eda9154f0 100644
+--- a/src/server/game/Entities/GameObject/GameObject.cpp
++++ b/src/server/game/Entities/GameObject/GameObject.cpp
+@@ -2843,6 +2843,14 @@ public:
+     uint32 GetPhaseMask() const override { return _owner->GetPhaseMask(); }
+     G3D::Vector3 GetPosition() const override { return G3D::Vector3(_owner->GetPositionX(), _owner->GetPositionY(), _owner->GetPositionZ()); }
+     float GetOrientation() const override { return _owner->GetOrientation(); }
++    G3D::Matrix3 GetRotation() const override
++    {
++        // Preserve transport collision behavior; static tilted props use their full orientation.
++        QuaternionData q = _owner->GetWorldRotation();
++        if (!_owner->GetTransport() && _owner->GetGoType() != GAMEOBJECT_TYPE_MAP_OBJ_TRANSPORT && _owner->GetGoType() != GAMEOBJECT_TYPE_TRANSPORT && (std::abs(q.x) > 1e-6f || std::abs(q.y) > 1e-6f))
++            return G3D::Matrix3(G3D::Quat(q.x, q.y, q.z, q.w));
++        return GameObjectModelOwnerBase::GetRotation();
++    }
+     float GetScale() const override { return _owner->GetObjectScale(); }
+     void DebugVisualizeCorner(G3D::Vector3 const& corner) const override { const_cast<GameObject*>(_owner)->SummonCreature(1, corner.x, corner.y, corner.z, 0, TEMPSUMMON_MANUAL_DESPAWN); }
+ 
+diff --git a/src/server/game/Entities/Object/Object.cpp b/src/server/game/Entities/Object/Object.cpp
+index 91c8b83a72..7762da6c59 100644
+--- a/src/server/game/Entities/Object/Object.cpp
++++ b/src/server/game/Entities/Object/Object.cpp
+@@ -1,3 +1,4 @@
++#include "HunterCombat.h"
+ /*
+  * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
+  *
+@@ -2647,6 +2648,9 @@ FactionTemplateEntry const* WorldObject::GetFactionTemplateEntry() const
+ // function based on function Unit::UnitReaction from 13850 client
+ ReputationRank WorldObject::GetReactionTo(WorldObject const* target) const
+ {
++    int hunterPrivateReaction = HunterCombat::Relation(ToUnit() ? ToUnit() : GetAffectingPlayer(), target->ToUnit());
++    if (hunterPrivateReaction >= 0) return hunterPrivateReaction == 1 ? REP_HOSTILE : REP_FRIENDLY;
++
+     // always friendly to self
+     if (this == target)
+         return REP_FRIENDLY;
+@@ -2842,6 +2846,8 @@ SpellCastResult WorldObject::CastSpell(CastSpellTargetArg const& targets, uint32
+ bool WorldObject::IsValidAttackTarget(WorldObject const* target, SpellInfo const* bySpell /*= nullptr*/) const
+ {
+     ASSERT(target);
++    int hunterRelation = HunterCombat::Relation(ToUnit() ? ToUnit() : GetAffectingPlayer(), target->ToUnit());
++    if (hunterRelation == 0) return false;
+ 
+     // some positive spells can be casted at hostile target
+     bool isPositiveSpell = bySpell && bySpell->IsPositive();
+@@ -2910,6 +2916,8 @@ bool WorldObject::IsValidAttackTarget(WorldObject const* target, SpellInfo const
+             return false;
+     }
+ 
++    if (hunterRelation == 1) return true; // Standard visibility, death and immunity checks above still apply.
++
+     // CvC case - can attack each other only when one of them is hostile
+     if (unit && !unit->HasUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED) && unitTarget && !unitTarget->HasUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED))
+         return IsHostileTo(unitTarget) || unitTarget->IsHostileTo(this);
+@@ -2986,6 +2994,7 @@ bool WorldObject::IsValidAttackTarget(WorldObject const* target, SpellInfo const
+ bool WorldObject::IsValidAssistTarget(WorldObject const* target, SpellInfo const* bySpell /*= nullptr*/) const
+ {
+     ASSERT(target);
++    if (HunterCombat::IsHunter(target->ToUnit()) && this != target) return false;
+ 
+     // some negative spells can be casted at friendly target
+     bool isNegativeSpell = bySpell && !bySpell->IsPositive();
+diff --git a/src/server/game/Entities/Player/Player.cpp b/src/server/game/Entities/Player/Player.cpp
+index afb6a1f770..79211be8ba 100644
+--- a/src/server/game/Entities/Player/Player.cpp
++++ b/src/server/game/Entities/Player/Player.cpp
+@@ -1,3 +1,7 @@
++#include "RegistryPolicy.h"
++#include "BirthNames.h"
++#include "HunterTravelEvents.h"
++#include "HunterCombat.h"
+ /*
+  * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
+  *
+@@ -1483,7 +1487,11 @@ bool Player::BuildEnumData(PreparedQueryResult result, WorldPacket* data)
+ 
+         *data << uint32(proto->DisplayInfoID);
+         *data << uint8(proto->InventoryType);
+-        *data << uint32(enchant ? enchant->ItemVisual : 0);
++        uint32 visual = enchant ? enchant->ItemVisual : 0;
++        CivilRegistry::Design familyDesign{};
++        if (*itemId==CivilRegistry::Tabard && CivilRegistry::Decode(uint16(*enchants),uint16(*enchants>>16),familyDesign))
++            visual = 0x80000000u | CivilRegistry::Pack(familyDesign);
++        *data << visual;
+     }
+ 
+     return true;
+@@ -4518,6 +4526,11 @@ Corpse* Player::CreateCorpse()
+     corpse->SetUInt32Value(CORPSE_FIELD_DISPLAY_ID, GetNativeDisplayId());
+ 
+     corpse->SetUInt32Value(CORPSE_FIELD_GUILD, GetGuildId());
++    if (auto tabard=GetItemByPos(INVENTORY_SLOT_BAG_0,EQUIPMENT_SLOT_TABARD); tabard && tabard->GetEntry()==CivilRegistry::Tabard) {
++        CivilRegistry::Design d{};
++        if(CivilRegistry::Decode(uint16(tabard->GetEnchantmentId(PERM_ENCHANTMENT_SLOT)),uint16(tabard->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT)),d))
++            corpse->SetUInt32Value(CORPSE_FIELD_GUILD,0x80000000u|CivilRegistry::Pack(d));
++    }
+ 
+     uint32 iDisplayID;
+     uint32 iIventoryType;
+@@ -8391,6 +8404,11 @@ void Player::SendLoot(ObjectGuid guid, LootType loot_type)
+             return;
+         }
+ 
++        if (HunterCombat::IsHunter(creature) && (loot_type != LOOT_CORPSE || !isAllowedToLoot(creature)))
++        {
++            SendLootError(guid, LOOT_ERROR_DIDNT_KILL);
++            return;
++        }
+         loot = &creature->loot;
+ 
+         if (loot_type == LOOT_PICKPOCKETING)
+@@ -13492,6 +13510,8 @@ void Player::ApplyEnchantment(Item* item, bool apply)
+ 
+ void Player::ApplyEnchantment(Item* item, EnchantmentSlot slot, bool apply, bool apply_dur, bool ignore_condition)
+ {
++    // Family tabards carry a cosmetic design, never a gameplay enchantment.
++    if (item && item->GetEntry()==CivilRegistry::Tabard) return;
+     if (!item || !item->IsEquipped())
+         return;
+ 
+@@ -17664,6 +17684,10 @@ bool Player::LoadFromDB(ObjectGuid guid, CharacterDatabaseQueryHolder const& hol
+ 
+ bool Player::isAllowedToLoot(Creature const* creature) const
+ {
++    // Hunter bounty private corpse: group membership never grants access.
++    if (HunterCombat::IsHunter(creature))
++        return creature->isDead() && HunterCombat::IsTarget(creature, this) && creature->loot.gold > 0;
++
+     if (!creature->isDead() || !creature->IsDamageEnoughForLootingAndReward())
+         return false;
+ 
+@@ -19053,6 +19077,7 @@ void Player::SaveToDB(bool create /*=false*/)
+ 
+ void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create /* = false */)
+ {
++    if(create) BirthNames::AppendIdentity(trans,GetGUID().GetCounter(),GetName());
+     // delay auto save at any saves (manual, in code, or autosave)
+     m_nextSave = sWorld->getIntConfig(CONFIG_INTERVAL_SAVE);
+ 
+@@ -21240,6 +21265,11 @@ bool Player::ActivateTaxiPathTo(std::vector<uint32> const& nodes, Creature* npc
+     // prevent stealth flight
+     //RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TALK);
+ 
++    // Only a paid, validated flightmaster itinerary is a clue. Scripted taxi
++    // spells and rejected/failed selections never disclose a destination.
++    if (npc)
++        HunterTravelEvents::Publish(GetGUID().GetRawValue(), nodes.front(), nodes.back(), GetTeam());
++
+     if (sWorld->getBoolConfig(CONFIG_INSTANT_TAXI))
+     {
+         TaxiNodesEntry const* lastPathNode = sTaxiNodesStore.LookupEntry(nodes[nodes.size()-1]);
+diff --git a/src/server/game/Entities/Transport/Transport.cpp b/src/server/game/Entities/Transport/Transport.cpp
+index b37a554adc..0202f4c915 100644
+--- a/src/server/game/Entities/Transport/Transport.cpp
++++ b/src/server/game/Entities/Transport/Transport.cpp
+@@ -24,6 +24,7 @@
+ #include "Log.h"
+ #include "MapManager.h"
+ #include "ObjectMgr.h"
++#include "Object.h"
+ #include "ScriptMgr.h"
+ #include "Spline.h"
+ #include "Player.h"
+@@ -31,6 +32,7 @@
+ #include "UpdateData.h"
+ #include "Vehicle.h"
+ #include <G3D/Vector3.h>
++#include "ObjectGuid.h"
+ 
+ Transport::Transport() : GameObject(),
+     _transportInfo(nullptr), _isMoving(true), _pendingStop(false),
+@@ -127,6 +129,22 @@ void Transport::Update(uint32 diff)
+     else if (!AIM_Initialize())
+         TC_LOG_ERROR("entities.transport", "Could not initialize GameObjectAI for Transport");
+ 
++    GMRoute::Pose editorPose;
++    if (GMTransport::Position(GetEntry(), m_goValue.Transport.PathProgress, editorPose))
++    {
++        if (_delayedTeleport) return;
++        GMTransport::CustomAnnouncements(GetEntry(), m_goValue.Transport.PathProgress, diff);
++        m_goValue.Transport.PathProgress = (m_goValue.Transport.PathProgress + diff) % GetTransportPeriod();
++        GMTransport::Position(GetEntry(), m_goValue.Transport.PathProgress, editorPose);
++        SetMoving(!editorPose.stopped);
++        if (editorPose.map != GetMapId())
++        {
++            TeleportTransport(editorPose.map, float(editorPose.p.x), float(editorPose.p.y), float(editorPose.p.z), float(editorPose.facing));
++            return;
++        }
++        UpdatePosition(float(editorPose.p.x), float(editorPose.p.y), float(editorPose.p.z), float(editorPose.facing));
++        return;
++    }
+     if (GetKeyFrames().size() <= 1)
+         return;
+ 
+@@ -235,6 +253,52 @@ void Transport::Update(uint32 diff)
+         }
+     }
+ 
++    if (GetGOInfo()->moTransport.taxiPathId == 1221)
++
++    {
++        // Rayon horizontal dans lequel on considère que le joueur est "sur le pont"
++        float radius = 100.0f;
++
++        // Tolérance verticale (en Z) par rapport au pont
++        float minDz = -1.0f;
++        float maxDz = 100.0f;
++
++        Map::PlayerList const& players = GetMap()->GetPlayers();
++
++        for (Map::PlayerList::const_iterator itr = players.begin(); itr != players.end(); ++itr)
++        {
++            Player* player = itr->GetSource();
++            if (!player)
++                continue;
++
++            // On évite les joueurs morts
++            if (!player->IsAlive())
++                continue;
++
++            // Déjà sur un transport différent ? On ne touche pas
++            if (player->GetTransport() && player->GetTransport() != this)
++                continue;
++
++            // Distance horizontale par rapport au centre du transport
++            float dx = player->GetPositionX() - GetPositionX();
++            float dy = player->GetPositionY() - GetPositionY();
++            float dist2 = dx * dx + dy * dy;
++            if (dist2 > radius * radius)
++                continue;
++
++            // Différence de hauteur Z par rapport au pont
++            float dz = player->GetPositionZ() - GetPositionZ();
++            if (dz < minDz || dz > maxDz)
++                continue;
++
++            // Déjà passager de CE transport ? Rien à faire
++            if (player->GetTransport() == this)
++                continue;
++
++            AddPassenger(player);
++        }
++    }
++
+     sScriptMgr->OnTransportUpdate(this, diff);
+ }
+ 
+@@ -248,6 +312,15 @@ void Transport::DelayedUpdate(uint32 /*diff*/)
+ 
+ void Transport::AddPassenger(WorldObject* passenger)
+ {
++    //TC_LOG_INFO("entities.transport",
++    //    "ADD_PASSENGER: transport entry=%u, pathId=%u, passenger=%s (guidLow=%u, typeId=%u, mapId=%u)",
++    //    GetEntry(),
++    //    GetGOInfo() ? GetGOInfo()->moTransport.taxiPathId : 0,
++    //    passenger->GetName().c_str(),
++    //    passenger->GetGUID(),
++    //    passenger->GetTypeId(),
++    //    GetMapId());
++
+     if (!IsInWorld())
+         return;
+ 
+@@ -265,6 +338,15 @@ void Transport::AddPassenger(WorldObject* passenger)
+ 
+ void Transport::RemovePassenger(WorldObject* passenger)
+ {
++    //TC_LOG_INFO("entities.transport",
++    //    "REMOVE_PASSENGER: transport entry=%u, pathId=%u, passenger=%s (guidLow=%u, typeId=%u, mapId=%u)",
++    //    GetEntry(),
++    //    GetGOInfo() ? GetGOInfo()->moTransport.taxiPathId : 0,
++    //    passenger->GetName().c_str(),
++    //    passenger->GetGUID(),
++    //    passenger->GetTypeId(),
++    //    GetMapId());
++
+     bool erased = false;
+     if (_passengerTeleportItr != _passengers.end())
+     {
+@@ -654,15 +736,17 @@ void Transport::DelayedTeleportTransport()
+         return;
+ 
+     _delayedTeleport = false;
+-    Map* newMap = sMapMgr->CreateBaseMap(_nextFrame->Node->ContinentID);
++    GMRoute::Pose editorPose;
++    bool editor = GMTransport::Position(GetEntry(), m_goValue.Transport.PathProgress, editorPose);
++    uint32 destinationMap = editor ? editorPose.map : _nextFrame->Node->ContinentID;
++    float x = editor ? float(editorPose.p.x) : _nextFrame->Node->Loc.X,
++          y = editor ? float(editorPose.p.y) : _nextFrame->Node->Loc.Y,
++          z = editor ? float(editorPose.p.z) : _nextFrame->Node->Loc.Z,
++          o = editor ? float(editorPose.facing) : _nextFrame->InitialOrientation;
++    Map* newMap = sMapMgr->CreateBaseMap(destinationMap);
+     GetMap()->RemoveFromMap<Transport>(this, false);
+     SetMap(newMap);
+ 
+-    float x = _nextFrame->Node->Loc.X,
+-          y = _nextFrame->Node->Loc.Y,
+-          z = _nextFrame->Node->Loc.Z,
+-          o =_nextFrame->InitialOrientation;
+-
+     for (_passengerTeleportItr = _passengers.begin(); _passengerTeleportItr != _passengers.end();)
+     {
+         WorldObject* obj = (*_passengerTeleportItr++);
+@@ -674,7 +758,7 @@ void Transport::DelayedTeleportTransport()
+         switch (obj->GetTypeId())
+         {
+             case TYPEID_PLAYER:
+-                if (!obj->ToPlayer()->TeleportTo(_nextFrame->Node->ContinentID, destX, destY, destZ, destO, TELE_TO_NOT_LEAVE_TRANSPORT))
++                if (!obj->ToPlayer()->TeleportTo(destinationMap, destX, destY, destZ, destO, TELE_TO_NOT_LEAVE_TRANSPORT))
+                     RemovePassenger(obj);
+                 break;
+             case TYPEID_DYNAMICOBJECT:
+@@ -688,6 +772,7 @@ void Transport::DelayedTeleportTransport()
+ 
+     Relocate(x, y, z, o);
+     GetMap()->AddToMap<Transport>(this);
++    if (editor) TC_LOG_INFO("entities.transport", "GM route {} transitioned to map {} with {} passengers", GetEntry(), destinationMap, _passengers.size());
+ }
+ 
+ void Transport::UpdatePassengerPositions(PassengerSet& passengers)
+@@ -748,6 +833,7 @@ void Transport::UpdatePassengerPositions(PassengerSet& passengers)
+ 
+ void Transport::DoEventIfAny(KeyFrame const& node, bool departure)
+ {
++    GMTransport::NativeAnnouncement(GetEntry(), node.Node->NodeIndex, departure);
+     if (uint32 eventid = departure ? node.Node->DepartureEventID : node.Node->ArrivalEventID)
+     {
+         TC_LOG_DEBUG("maps.script", "Taxi {} event {} of node {} of {} path", departure ? "departure" : "arrival", eventid, node.Node->NodeIndex, GetName());
+diff --git a/src/server/game/Entities/Unit/Unit.cpp b/src/server/game/Entities/Unit/Unit.cpp
+index 8a1ce0ec78..f211b4e163 100644
+--- a/src/server/game/Entities/Unit/Unit.cpp
++++ b/src/server/game/Entities/Unit/Unit.cpp
+@@ -1,3 +1,4 @@
++#include "HunterCombat.h"
+ /*
+  * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
+  *
+@@ -710,6 +711,8 @@ bool Unit::HasBreakableByDamageCrowdControlAura(Unit* excludeCasterChannel) cons
+ 
+ /*static*/ uint32 Unit::DealDamage(Unit* attacker, Unit* victim, uint32 damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellInfo const* spellProto, bool durabilityLoss)
+ {
++    if (HunterCombat::Relation(attacker, victim) == 0) return 0;
++
+     uint32 rage_damage = damage + (cleanDamage ? cleanDamage->absorbed_damage : 0);
+ 
+     if (UnitAI* victimAI = victim->GetAI())
+@@ -10922,6 +10925,8 @@ bool Unit::InitTamedPet(Pet* pet, uint8 level, uint32 spell_id)
+ 
+ /*static*/ void Unit::Kill(Unit* attacker, Unit* victim, bool durabilityLoss /*= true*/)
+ {
++    if (HunterCombat::Relation(attacker, victim) == 0) return;
++
+     // Prevent killing unit twice (and giving reward from kill twice)
+     if (!victim->GetHealth())
+         return;
+@@ -13615,6 +13620,9 @@ void Unit::BuildValuesUpdate(uint8 updateType, ByteBuffer* data, Player const* t
+             if (index == UNIT_NPC_FLAGS)
+             {
+                 uint32 appendValue = m_uint32Values[UNIT_NPC_FLAGS];
++                if (HunterCombat::IsHunter(this) && HunterCombat::IsTarget(this, target))
++                    appendValue &= ~UNIT_NPC_FLAG_GOSSIP;
++
+ 
+                 if (creature)
+                     if (!target->CanSeeSpellClickOn(creature))
+@@ -13707,6 +13715,8 @@ void Unit::BuildValuesUpdate(uint8 updateType, ByteBuffer* data, Player const* t
+                 fieldBuffer << dynamicFlags;
+             }
+             // FG: pretend that OTHER players in own group are friendly ("blue")
++            else if (index == UNIT_FIELD_FACTIONTEMPLATE && HunterCombat::IsHunter(this))
++                fieldBuffer << HunterCombat::ViewerFaction(this, target);
+             else if (index == UNIT_FIELD_BYTES_2 || index == UNIT_FIELD_FACTIONTEMPLATE)
+             {
+                 if (IsControlledByPlayer() && target != this && sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_GROUP) && IsInRaidWith(target))
+diff --git a/src/server/game/Globals/ObjectMgr.cpp b/src/server/game/Globals/ObjectMgr.cpp
+index 634e597ed8..cf7c1b2b11 100644
+--- a/src/server/game/Globals/ObjectMgr.cpp
++++ b/src/server/game/Globals/ObjectMgr.cpp
+@@ -1,3 +1,5 @@
++#include "RegistryPolicy.h"
++#include "RoleplayNameParts.h"
+ /*
+  * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
+  *
+@@ -16,6 +18,7 @@
+  */
+ 
+ #include "ObjectMgr.h"
++#include "GMTransportRoute.h"
+ #include "AchievementMgr.h"
+ #include "ArenaTeamMgr.h"
+ #include "Bag.h"
+@@ -144,9 +147,13 @@ bool normalizePlayerName(std::string& name)
+     if (!Utf8toWStr(name, tmp))
+         return false;
+ 
++    if (name.find(' ')!=std::string::npos) {
++        std::string_view first,last;
++        if (!RoleplayNames::Split(name,first,last)) return false;
++    }
+     wstrToLower(tmp);
+-    if (!tmp.empty())
+-        tmp[0] = wcharToUpper(tmp[0]);
++    for (size_t i=0;i<tmp.size();++i)
++        if (!i || tmp[i-1]==L' ') tmp[i]=wcharToUpper(tmp[i]);
+ 
+     if (!WStrToUtf8(tmp, name))
+         return false;
+@@ -3090,7 +3097,9 @@ void ObjectMgr::LoadItemTemplates()
+ 
+         // Checks
+ 
+-        ItemEntry const* dbcitem = sItemStore.LookupEntry(entry);
++        // Civil-registry items reuse the exact artwork/type of these stock items.
++        uint32 dbcEntry = entry==CivilRegistry::Paper ? 5863 : entry==CivilRegistry::Tabard ? 5976 : entry==CivilRegistry::Ring ? 7337 : entry;
++        ItemEntry const* dbcitem = sItemStore.LookupEntry(dbcEntry);
+ 
+         if (dbcitem)
+         {
+@@ -7446,7 +7455,7 @@ AreaTriggerTeleport const* ObjectMgr::GetMapEntranceTrigger(uint32 Map) const
+ 
+ void ObjectMgr::SetHighestGuids()
+ {
+-    QueryResult result = CharacterDatabase.Query("SELECT MAX(guid) FROM characters");
++    QueryResult result = CharacterDatabase.Query("SELECT GREATEST(COALESCE((SELECT MAX(guid) FROM characters),0),COALESCE((SELECT MAX(player) FROM rp_registry_birth_name),0))");
+     if (result)
+         GetGenerator<HighGuid::Player>().Set((*result)[0].GetUInt32() + 1);
+ 
+@@ -8679,6 +8688,8 @@ void ObjectMgr::LoadReservedPlayersNames()
+ 
+ bool ObjectMgr::IsReservedName(std::string_view name) const
+ {
++    std::string_view first,last;
++    if (RoleplayNames::Split(name,first,last)) return IsReservedName(first) || IsReservedName(last);
+     std::wstring wstr;
+     if (!Utf8toWStr (name, wstr))
+         return false;
+@@ -8763,11 +8774,13 @@ bool isValidString(const std::wstring& wstr, uint32 strictMask, bool numericOrSp
+ 
+ ResponseCodes ObjectMgr::CheckPlayerName(std::string_view name, LocaleConstant locale, bool create /*= false*/)
+ {
++    auto checkPart=[&](std::string_view name)->ResponseCodes {
++
+     std::wstring wname;
+     if (!Utf8toWStr(name, wname))
+         return CHAR_NAME_INVALID_CHARACTER;
+ 
+-    if (wname.size() > MAX_PLAYER_NAME)
++    if (wname.size() > 12)
+         return CHAR_NAME_TOO_LONG;
+ 
+     uint32 minName = sWorld->getIntConfig(CONFIG_MIN_PLAYER_NAME);
+@@ -8784,6 +8797,16 @@ ResponseCodes ObjectMgr::CheckPlayerName(std::string_view name, LocaleConstant l
+             return CHAR_NAME_THREE_CONSECUTIVE;
+ 
+     return ValidateName(wname, locale);
++
++    };
++    std::string_view first,last;
++    if (RoleplayNames::Split(name,first,last)) {
++        auto result=checkPart(first);
++        return result==CHAR_NAME_SUCCESS ? checkPart(last) : result;
++    }
++    // Legacy single names remain usable for existing characters at login.
++    if (!create && name.find(' ')==std::string_view::npos) return checkPart(name);
++    return CHAR_NAME_INVALID_SPACE;
+ }
+ 
+ bool ObjectMgr::IsValidCharterName(std::string_view name)
+@@ -10291,6 +10314,7 @@ void ObjectMgr::LoadFactionChangeTitles()
+ 
+ GameObjectTemplate const* ObjectMgr::GetGameObjectTemplate(uint32 entry) const
+ {
++    if (auto custom = GMTransport::Template(entry)) return custom;
+     return Trinity::Containers::MapGetValuePtr(_gameObjectTemplateStore, entry);
+ }
+ 
+diff --git a/src/server/game/Globals/ObjectMgr.h b/src/server/game/Globals/ObjectMgr.h
+index 162feb35b3..7c52f8d8e2 100644
+--- a/src/server/game/Globals/ObjectMgr.h
++++ b/src/server/game/Globals/ObjectMgr.h
+@@ -875,8 +875,8 @@ enum SkillRangeType
+ 
+ SkillRangeType GetSkillRangeType(SkillRaceClassInfoEntry const* rcEntry);
+ 
+-#define MAX_PLAYER_NAME          12                         // max allowed by client name length
+-#define MAX_INTERNAL_PLAYER_NAME 15                         // max server internal player name length (> MAX_PLAYER_NAME for support declined names)
++#define MAX_PLAYER_NAME          25                         // max allowed by client name length
++#define MAX_INTERNAL_PLAYER_NAME 28                         // max server internal player name length (> MAX_PLAYER_NAME for support declined names)
+ #define MAX_PET_NAME             12                         // max allowed by client name length
+ #define MAX_CHARTER_NAME         24                         // max allowed by client name length
+ 
+diff --git a/src/server/game/Groups/Group.cpp b/src/server/game/Groups/Group.cpp
+index c9993f95f4..86fccc5dce 100644
+--- a/src/server/game/Groups/Group.cpp
++++ b/src/server/game/Groups/Group.cpp
+@@ -2475,6 +2475,13 @@ ObjectGuid Group::GetGUID() const
+     return m_guid;
+ }
+ 
++void Group::UpdateMemberName(ObjectGuid guid, std::string const& name)
++{
++    for(auto& member:m_memberSlots)if(member.guid==guid)member.name=name;
++    if(m_leaderGuid==guid)m_leaderName=name;
++    SendUpdate();
++}
++
+ char const* Group::GetLeaderName() const
+ {
+     return m_leaderName.c_str();
+diff --git a/src/server/game/Groups/Group.h b/src/server/game/Groups/Group.h
+index ac00ffeab2..b431953fa7 100644
+--- a/src/server/game/Groups/Group.h
++++ b/src/server/game/Groups/Group.h
+@@ -218,6 +218,7 @@ class TC_GAME_API Group
+         ObjectGuid GetLeaderGUID() const;
+         ObjectGuid GetGUID() const;
+         const char * GetLeaderName() const;
++        void UpdateMemberName(ObjectGuid guid, std::string const& name);
+         LootMethod GetLootMethod() const;
+         ObjectGuid GetLooterGuid() const;
+         ObjectGuid GetMasterLooterGuid() const;
+diff --git a/src/server/game/Guilds/Guild.cpp b/src/server/game/Guilds/Guild.cpp
+index 59bf3314f1..c1c14dab28 100644
+--- a/src/server/game/Guilds/Guild.cpp
++++ b/src/server/game/Guilds/Guild.cpp
+@@ -1189,6 +1189,12 @@ void Guild::Disband()
+     sGuildMgr->RemoveGuild(m_id);
+ }
+ 
++void Guild::UpdateMemberName(ObjectGuid guid, std::string_view name)
++{
++    if (auto m=GetMember(guid))
++        m->SetStats(name,m->GetLevel(),m->GetClass(),m->GetGender(),m->GetZoneId(),m->GetAccountId());
++}
++
+ void Guild::UpdateMemberData(Player* player, uint8 dataid, uint32 value)
+ {
+     if (Member* member = GetMember(player->GetGUID()))
+diff --git a/src/server/game/Guilds/Guild.h b/src/server/game/Guilds/Guild.h
+index 2842b1dc47..38faa6d0e7 100644
+--- a/src/server/game/Guilds/Guild.h
++++ b/src/server/game/Guilds/Guild.h
+@@ -671,6 +671,7 @@ class TC_GAME_API Guild
+         void HandleDisband(WorldSession* session);
+ 
+         void UpdateMemberData(Player* player, uint8 dataid, uint32 value);
++        void UpdateMemberName(ObjectGuid guid, std::string_view name);
+         void OnPlayerStatusChange(Player* player, uint32 flag, bool state);
+ 
+         // Send info to client
+diff --git a/src/server/game/Handlers/CharacterHandler.cpp b/src/server/game/Handlers/CharacterHandler.cpp
+index 5f8a4abd36..ef7260a350 100644
+--- a/src/server/game/Handlers/CharacterHandler.cpp
++++ b/src/server/game/Handlers/CharacterHandler.cpp
+@@ -39,6 +39,7 @@
+ #include "MotionMaster.h"
+ #include "ObjectAccessor.h"
+ #include "ObjectMgr.h"
++#include "BirthNames.h"
+ #include "Opcodes.h"
+ #include "Pet.h"
+ #include "Player.h"
+@@ -376,6 +377,10 @@ void WorldSession::HandleCharCreateOpcode(WorldPacket& recvData)
+     }
+ 
+     // check name limitations
++    if (BirthNames::Taken(createInfo->Name, 0)) {
++        SendCharCreate(CHAR_CREATE_NAME_IN_USE);
++        return;
++    }
+     ResponseCodes res = ObjectMgr::CheckPlayerName(createInfo->Name, GetSessionDbcLocale(), true);
+     if (res != CHAR_NAME_SUCCESS)
+     {
+@@ -1112,6 +1117,10 @@ void WorldSession::HandleCharRenameOpcode(WorldPacket& recvData)
+         return;
+     }
+ 
++    if (BirthNames::Taken(renameInfo->Name, renameInfo->Guid.GetCounter())) {
++        SendCharRename(CHAR_CREATE_NAME_IN_USE, renameInfo.get());
++        return;
++    }
+     ResponseCodes res = ObjectMgr::CheckPlayerName(renameInfo->Name, GetSessionDbcLocale(), true);
+     if (res != CHAR_NAME_SUCCESS)
+     {
+@@ -1161,6 +1170,7 @@ void WorldSession::HandleCharRenameCallBack(std::shared_ptr<CharacterRenameInfo>
+ 
+     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+ 
++    BirthNames::AppendRename(trans,renameInfo->Guid.GetCounter(),oldName,renameInfo->Name);
+     // Update name and at_login flag in the db
+     CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_UPD_CHAR_NAME_AT_LOGIN);
+ 
+@@ -1168,14 +1178,17 @@ void WorldSession::HandleCharRenameCallBack(std::shared_ptr<CharacterRenameInfo>
+     stmt->setUInt16(1, atLoginFlags);
+     stmt->setUInt32(2, renameInfo->Guid.GetCounter());
+ 
+-    CharacterDatabase.Execute(stmt);
++    trans->Append(stmt);
+ 
+     // Removed declined name from db
+     stmt = CharacterDatabase.GetPreparedStatement(CHAR_DEL_DECLINED_NAME);
+ 
+     stmt->setUInt32(0, renameInfo->Guid.GetCounter());
+ 
+-    CharacterDatabase.Execute(stmt);
++    trans->Append(stmt);
++    if(!CharacterDatabase.AsyncCommitTransaction(trans).m_future.get()) {
++        SendCharRename(CHAR_CREATE_NAME_IN_USE,renameInfo.get());return;
++    }
+ 
+     TC_LOG_INFO("entities.player.character", "Account: {} (IP: {}) Character:[{}] ({}) Changed name to: {}", GetAccountId(), GetRemoteAddress(), oldName, renameInfo->Guid.ToString(), renameInfo->Name);
+ 
+@@ -1421,6 +1434,10 @@ void WorldSession::HandleCharCustomizeCallback(std::shared_ptr<CharacterCustomiz
+         return;
+     }
+ 
++    if (BirthNames::Taken(customizeInfo->Name, customizeInfo->Guid.GetCounter())) {
++        SendCharCustomize(CHAR_CREATE_NAME_IN_USE, customizeInfo.get());
++        return;
++    }
+     ResponseCodes res = ObjectMgr::CheckPlayerName(customizeInfo->Name, GetSessionDbcLocale(), true);
+     if (res != CHAR_NAME_SUCCESS)
+     {
+@@ -1451,6 +1468,7 @@ void WorldSession::HandleCharCustomizeCallback(std::shared_ptr<CharacterCustomiz
+ 
+     ObjectGuid::LowType lowGuid = customizeInfo->Guid.GetCounter();
+ 
++    BirthNames::AppendRename(trans,customizeInfo->Guid.GetCounter(),oldName,customizeInfo->Name);
+     /// Customize
+     Player::Customize(customizeInfo.get(), trans);
+ 
+@@ -1469,7 +1487,9 @@ void WorldSession::HandleCharCustomizeCallback(std::shared_ptr<CharacterCustomiz
+         trans->Append(stmt);
+     }
+ 
+-    CharacterDatabase.CommitTransaction(trans);
++    if(!CharacterDatabase.AsyncCommitTransaction(trans).m_future.get()) {
++        SendCharCustomize(CHAR_CREATE_NAME_IN_USE,customizeInfo.get());return;
++    }
+ 
+     sCharacterCache->UpdateCharacterData(customizeInfo->Guid, customizeInfo->Name, customizeInfo->Gender);
+ 
+@@ -1654,7 +1674,7 @@ void WorldSession::HandleCharFactionOrRaceChangeCallback(std::shared_ptr<Charact
+     uint8 oldRace     = characterInfo->Race;
+     uint8 playerClass = characterInfo->Class;
+     uint8 level       = characterInfo->Level;
+-    //std::string oldName = characterInfo->Name;
++    std::string oldName = characterInfo->Name;
+ 
+     if (!sObjectMgr->GetPlayerInfo(factionChangeInfo->Race, playerClass))
+     {
+@@ -1718,6 +1738,10 @@ void WorldSession::HandleCharFactionOrRaceChangeCallback(std::shared_ptr<Charact
+         return;
+     }
+ 
++    if (BirthNames::Taken(factionChangeInfo->Name, factionChangeInfo->Guid.GetCounter())) {
++        SendCharFactionChange(CHAR_CREATE_NAME_IN_USE, factionChangeInfo.get());
++        return;
++    }
+     ResponseCodes res = ObjectMgr::CheckPlayerName(factionChangeInfo->Name, GetSessionDbcLocale(), true);
+     if (res != CHAR_NAME_SUCCESS)
+     {
+@@ -1755,6 +1779,7 @@ void WorldSession::HandleCharFactionOrRaceChangeCallback(std::shared_ptr<Charact
+     CharacterDatabasePreparedStatement* stmt = nullptr;
+     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+ 
++    BirthNames::AppendRename(trans,factionChangeInfo->Guid.GetCounter(),oldName,factionChangeInfo->Name);
+     // resurrect the character in case he's dead
+     Player::OfflineResurrect(factionChangeInfo->Guid, trans);
+ 
+@@ -1785,7 +1810,7 @@ void WorldSession::HandleCharFactionOrRaceChangeCallback(std::shared_ptr<Charact
+         trans->Append(stmt);
+     }
+ 
+-    sCharacterCache->UpdateCharacterData(factionChangeInfo->Guid, factionChangeInfo->Name, factionChangeInfo->Gender, factionChangeInfo->Race);
++    // Family identity cache is published only after successful commit.
+ 
+     if (oldRace != factionChangeInfo->Race)
+     {
+@@ -2146,7 +2171,10 @@ void WorldSession::HandleCharFactionOrRaceChangeCallback(std::shared_ptr<Charact
+         }
+     }
+ 
+-    CharacterDatabase.CommitTransaction(trans);
++    if(!CharacterDatabase.AsyncCommitTransaction(trans).m_future.get()) {
++        SendCharFactionChange(CHAR_CREATE_NAME_IN_USE,factionChangeInfo.get());return;
++    }
++    sCharacterCache->UpdateCharacterData(factionChangeInfo->Guid, factionChangeInfo->Name, factionChangeInfo->Gender, factionChangeInfo->Race);
+ 
+     TC_LOG_DEBUG("entities.player", "{} (IP: {}) changed race from {} to {}", GetPlayerInfo(), GetRemoteAddress(), oldRace, factionChangeInfo->Race);
+ 
+diff --git a/src/server/game/Handlers/LootHandler.cpp b/src/server/game/Handlers/LootHandler.cpp
+index 73ae6746f4..3bc3815387 100644
+--- a/src/server/game/Handlers/LootHandler.cpp
++++ b/src/server/game/Handlers/LootHandler.cpp
+@@ -1,3 +1,4 @@
++#include "HunterCombat.h"
+ /*
+  * This file is part of the TrinityCore Project. See AUTHORS file for Copyright information
+  *
+@@ -150,6 +151,12 @@ void WorldSession::HandleLootMoneyOpcode(WorldPacket& /*recvData*/)
+             bool lootAllowed = creature && creature->IsAlive() == (player->GetClass() == CLASS_ROGUE && creature->loot.loot_type == LOOT_PICKPOCKETING);
+             if (lootAllowed && creature->IsWithinDistInMap(player, INTERACTION_DISTANCE))
+             {
++                if (HunterCombat::IsHunter(creature))
++                {
++                    if (!player->isAllowedToLoot(creature)) { player->SendLootError(guid, LOOT_ERROR_DIDNT_KILL); return; }
++                    creature->AI()->SetGUID(player->GetGUID(), HunterCombat::ClaimSlot);
++                    return; // The contract transaction credits exactly one player.
++                }
+                 loot = &creature->loot;
+                 if (creature->IsAlive())
+                     shareMoney = false;
+diff --git a/src/server/game/Maps/TransportMgr.cpp b/src/server/game/Maps/TransportMgr.cpp
+index 5a16c8b955..284bda73cc 100644
+--- a/src/server/game/Maps/TransportMgr.cpp
++++ b/src/server/game/Maps/TransportMgr.cpp
+@@ -47,6 +47,7 @@ void TransportMgr::Unload()
+ 
+ void TransportMgr::LoadTransportTemplates()
+ {
++    GMTransport::LoadNative();
+     uint32 oldMSTime = getMSTime();
+ 
+     QueryResult result = WorldDatabase.Query("SELECT entry FROM gameobject_template WHERE type = 15 ORDER BY entry ASC");
+@@ -125,7 +126,8 @@ public:
+ void TransportMgr::GeneratePath(GameObjectTemplate const* goInfo, TransportTemplate* transport)
+ {
+     uint32 pathId = goInfo->moTransport.taxiPathId;
+-    TaxiPathNodeList const& path = sTaxiPathNodesByPath[pathId];
++    auto editorPath = GMTransport::NativePath(goInfo->entry);
++    TaxiPathNodeList const& path = editorPath ? *editorPath : sTaxiPathNodesByPath[pathId];
+     std::vector<KeyFrame>& keyFrames = transport->keyFrames;
+     Movement::PointsArray splinePath, allPoints;
+     bool mapChange = false;
+diff --git a/src/server/game/Maps/TransportMgr.h b/src/server/game/Maps/TransportMgr.h
+index ff066bbf22..f3e2140132 100644
+--- a/src/server/game/Maps/TransportMgr.h
++++ b/src/server/game/Maps/TransportMgr.h
+@@ -19,6 +19,7 @@
+ #define TRANSPORTMGR_H
+ 
+ #include "DBCStores.h"
++#include "GMTransportRoute.h"
+ #include "ObjectGuid.h"
+ #include <memory>
+ 
+@@ -122,6 +123,7 @@ class TC_GAME_API TransportMgr
+ 
+         TransportTemplate const* GetTransportTemplate(uint32 entry) const
+         {
++            if (auto custom = GMTransport::Path(entry)) return custom;
+             TransportTemplates::const_iterator itr = _transportTemplates.find(entry);
+             if (itr != _transportTemplates.end())
+                 return &itr->second;
+diff --git a/src/server/scripts/CMakeLists.txt b/src/server/scripts/CMakeLists.txt
+index fb4ba169b4..35ecd4e819 100644
+--- a/src/server/scripts/CMakeLists.txt
++++ b/src/server/scripts/CMakeLists.txt
+@@ -10,6 +10,8 @@
+ 
+ message("")
+ 
++add_subdirectory(Custom)
++
+ # Make the script module list available in the current scope
+ GetScriptModuleList(SCRIPT_MODULE_LIST)
+ 
+diff --git a/src/server/scripts/Commands/cs_gobject.cpp b/src/server/scripts/Commands/cs_gobject.cpp
+index 8d62192ec5..565db302d9 100644
+--- a/src/server/scripts/Commands/cs_gobject.cpp
++++ b/src/server/scripts/Commands/cs_gobject.cpp
+@@ -40,6 +40,9 @@ EndScriptData */
+ #include "PoolMgr.h"
+ #include "RBAC.h"
+ #include "WorldSession.h"
++#include <cmath>
++#include <unordered_map>
++#include "GMBlueprintMath.h"
+ 
+ using namespace Trinity::ChatCommands;
+ 
+@@ -57,8 +60,14 @@ public:
+ 
+     ChatCommandTable GetCommands() const override
+     {
++        static ChatCommandTable blueprintCommandTable =
++        {
++            { "info",  HandleBlueprintInfo,  rbac::RBAC_PERM_COMMAND_GOBJECT_ADD, Console::No },
++            { "place", HandleBlueprintPlace, rbac::RBAC_PERM_COMMAND_GOBJECT_ADD, Console::No },
++        };
+         static ChatCommandTable gobjectCommandTable =
+         {
++            { "blueprint", blueprintCommandTable },
+             { "activate",       HandleGameObjectActivateCommand,  rbac::RBAC_PERM_COMMAND_GOBJECT_ACTIVATE,       Console::No },
+             { "delete",         HandleGameObjectDeleteCommand,    rbac::RBAC_PERM_COMMAND_GOBJECT_DELETE,         Console::No },
+             { "info",           HandleGameObjectInfoCommand,      rbac::RBAC_PERM_COMMAND_GOBJECT_INFO,           Console::No },
+@@ -80,6 +89,102 @@ public:
+         return commandTable;
+     }
+ 
++    static bool BlueprintError(ChatHandler* handler, char const* message)
++    {
++        handler->PSendSysMessage("[WB:ERROR] %s", message);
++        handler->SetSentErrorMessage(true);
++        return false;
++    }
++
++    static GameObjectTemplate const* BlueprintTemplate(ChatHandler* handler, uint32 entry)
++    {
++        GameObjectTemplate const* info = sObjectMgr->GetGameObjectTemplate(entry);
++        if (!info || !info->displayId || !sGameObjectDisplayInfoStore.LookupEntry(info->displayId))
++        {
++            BlueprintError(handler, "Identifiant inconnu ou modele absent.");
++            return nullptr;
++        }
++        if (info->type == GAMEOBJECT_TYPE_TRANSPORT || info->type == GAMEOBJECT_TYPE_MAP_OBJ_TRANSPORT)
++        {
++            BlueprintError(handler, "Les transports ne sont pas pris en charge par cet outil.");
++            return nullptr;
++        }
++        return info;
++    }
++
++    static bool HandleBlueprintInfo(ChatHandler* handler, uint32 entry)
++    {
++        if (!BlueprintTemplate(handler, entry))
++            return false;
++        handler->PSendSysMessage("[WB:READY:%u]", entry);
++        return true;
++    }
++
++    // Local editor extension. The existing add command remains unchanged.
++    // The permission table uses the same RBAC permission as .gobject add.
++    static bool HandleBlueprintPlace(ChatHandler* handler, uint32 entry, uint32 mapId,
++        float x, float y, float z, float facing, uint32 token,
++        Optional<float> qx, Optional<float> qy, Optional<float> qz, Optional<float> qw)
++    {
++        Player* player = handler->GetSession()->GetPlayer();
++        if (!player || !player->IsInWorld() || player->GetMapId() != mapId || player->GetTransport())
++            return BlueprintError(handler, "Carte differente, personnage hors du monde ou sur un transport.");
++        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z) || !std::isfinite(facing))
++            return BlueprintError(handler, "Coordonnees non finies.");
++        QuaternionData rotation=QuaternionData::fromEulerAnglesZYX(facing,0.f,0.f);
++        bool full=qx.has_value()||qy.has_value()||qz.has_value()||qw.has_value();
++        if(full) {
++            if(!qx||!qy||!qz||!qw) return BlueprintError(handler,"Rotation incomplete.");
++            GMGizmo::Quat q{*qx,*qy,*qz,*qw};
++            if(!GMGizmo::Unit(q)) return BlueprintError(handler,"Rotation invalide.");
++            q=GMGizmo::Normalize(q);rotation=QuaternionData(float(q.x),float(q.y),float(q.z),float(q.w));
++            facing=float(GMGizmo::Yaw(q));
++        }
++        Position position(x, y, z, facing);
++        if (!position.IsPositionValid() || player->GetExactDist(&position) > 100.0f)
++            return BlueprintError(handler, "Position invalide ou a plus de 100 metres du personnage.");
++        GameObjectTemplate const* info = BlueprintTemplate(handler, entry);
++        if (!info)
++            return false;
++
++        // Protect the most recent placement per account against an accidental
++        // resend. No database schema change and no automatic client retry.
++        struct Receipt { uint32 token; ObjectGuid::LowType spawn; };
++        static std::unordered_map<uint32, Receipt> receipts;
++        uint32 account = handler->GetSession()->GetAccountId();
++        auto previous = receipts.find(account);
++        if (previous != receipts.end() && previous->second.token == token)
++        {
++            handler->PSendSysMessage("[WB:OK:%u:%u]", token, previous->second.spawn);
++            return true;
++        }
++
++        Map* map = player->GetMap();
++        GameObject* object = new GameObject();
++        if (!object->Create(map->GenerateLowGuid<HighGuid::GameObject>(), entry, map,
++            player->GetPhaseMaskForSpawn(), position, rotation, 255, GO_STATE_READY))
++        {
++            delete object;
++            return BlueprintError(handler, "Le serveur ne peut pas creer cet objet.");
++        }
++        object->SaveToDB(mapId, (1 << map->GetSpawnMode()), player->GetPhaseMaskForSpawn());
++        ObjectGuid::LowType spawn = object->GetSpawnId();
++        delete object;
++        object = new GameObject();
++        if (!object->LoadFromDB(spawn, map, true))
++        {
++            delete object;
++            handler->PSendSysMessage("[WB:ERROR] Sauvegarde effectuee (GUID %u), chargement impossible. Verifie cet objet avant de recommencer.", spawn);
++            return false;
++        }
++        sObjectMgr->AddGameobjectToGrid(spawn, sObjectMgr->GetGameObjectData(spawn));
++        if (receipts.size() >= 256)
++            receipts.erase(receipts.begin());
++        receipts[account] = {token, spawn};
++        handler->PSendSysMessage("[WB:OK:%u:%u]", token, spawn);
++        return true;
++    }
++
+     static bool HandleGameObjectActivateCommand(ChatHandler* handler, GameObjectSpawnId guidLow)
+     {
+         GameObject* object = handler->GetObjectFromPlayerMapByDbGuid(guidLow);
+diff --git a/src/server/scripts/Commands/cs_misc.cpp b/src/server/scripts/Commands/cs_misc.cpp
+index 474296a6a2..b0f7bf08e1 100644
+--- a/src/server/scripts/Commands/cs_misc.cpp
++++ b/src/server/scripts/Commands/cs_misc.cpp
+@@ -493,6 +493,16 @@ public:
+     // Summon Player
+     static bool HandleSummonCommand(ChatHandler* handler, char const* args)
+     {
++        std::string complete = args ? args : "";
++        auto first=complete.find_first_not_of(" \t");
++        if(first!=std::string::npos)complete=complete.substr(first,complete.find_last_not_of(" \t")-first+1);
++        if(!complete.empty() && complete.front()!='|' && complete.front()!='"') {
++            if(!normalizePlayerName(complete) || ObjectMgr::CheckPlayerName(complete,handler->GetSession()->GetSessionDbcLocale(),false)!=CHAR_NAME_SUCCESS) {
++                handler->SendSysMessage(LANG_PLAYER_NOT_FOUND);handler->SetSentErrorMessage(true);return false;
++            }
++            complete="|cffffffff|Hplayer:"+complete+"|h["+complete+"]|h|r";
++            args=complete.c_str();
++        }
+         Player* target;
+         ObjectGuid targetGuid;
+         std::string targetName;
+diff --git a/src/server/scripts/Custom/custom_script_loader.cpp b/src/server/scripts/Custom/custom_script_loader.cpp
+--- a/src/server/scripts/Custom/custom_script_loader.cpp
++++ b/src/server/scripts/Custom/custom_script_loader.cpp
+@@ -19,6 +19,17 @@
+ 
+ // The name of this function should match:
+ // void Add${NameOfDirectory}Scripts()
++void AddSC_civil_registry();
++void AddSC_rp_greetings();
++void AddSC_roleplay_names_tests();
++void AddSC_gm_transport();
++void AddSC_hunter_navigation_prototype();
++
+ void AddCustomScripts()
+ {
++    AddSC_civil_registry();
++    AddSC_rp_greetings();
++    AddSC_roleplay_names_tests();
++    AddSC_gm_transport();
++    AddSC_hunter_navigation_prototype();
+ }

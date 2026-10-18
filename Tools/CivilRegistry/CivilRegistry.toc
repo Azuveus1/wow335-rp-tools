@@ -1,0 +1,6 @@
+## Interface: 30300
+## Title: Registre civil
+## Notes: Noms, contrats de mariage, alliances gravees et tabards familiaux.
+## Version: 1.1
+CivilRegistry.lua
+WeddingSlot.lua

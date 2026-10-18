@@ -1,0 +1,25 @@
+cmake_minimum_required(VERSION 3.15)
+project(RoleplayNamesTests CXX)
+add_executable(rp_extract_ui extract_ui.cpp)
+target_include_directories(rp_extract_ui PRIVATE C:/TC/TrinityCore/dep/libmpq)
+target_link_libraries(rp_extract_ui PRIVATE C:/TC/build/dep/libmpq/Release/mpq.lib C:/TC/build/dep/zlib/Release/zlib.lib C:/TC/build/dep/bzip2/Release/bzip2.lib)
+target_compile_features(rp_extract_ui PRIVATE cxx_std_17)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/QuestParserUnderTest.inc"
+ COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/GenerateParserTest.py" "${CMAKE_CURRENT_BINARY_DIR}/QuestParserUnderTest.inc"
+ DEPENDS GenerateParserTest.py ../../WoW/Source/Ui/QuestTextParser.cpp)
+add_executable(rp_dialogue_test test_dialogue.cpp "${CMAKE_CURRENT_BINARY_DIR}/QuestParserUnderTest.inc")
+target_include_directories(rp_dialogue_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_features(rp_dialogue_test PRIVATE cxx_std_17)
+if(MSVC)
+ target_compile_options(rp_dialogue_test PRIVATE /UNDEBUG /utf-8)
+endif()
+add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/LiveNamesUnderTest.inc"
+ COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/GenerateLiveNameTest.py" "${CMAKE_CURRENT_BINARY_DIR}/LiveNamesUnderTest.inc"
+ DEPENDS GenerateLiveNameTest.py ../../WoW/Source/Ui/GameUI.cpp ../../WoW/Source/Object/ObjectClient/Unit_C.cpp ../../WoW/Source/DB/DBClient/DBCacheInstances.cpp)
+add_executable(rp_live_names_test test_live_names.cpp "${CMAKE_CURRENT_BINARY_DIR}/LiveNamesUnderTest.inc")
+target_include_directories(rp_live_names_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+target_compile_features(rp_live_names_test PRIVATE cxx_std_17)
+if(MSVC)
+ target_compile_options(rp_live_names_test PRIVATE /UNDEBUG /utf-8)
+endif()

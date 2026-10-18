@@ -1,0 +1,9 @@
+## Interface: 30300
+## Title: GM Transport
+## Notes: Visual route editor for the modified wowdecomp client and TrinityCore.
+## Version: 1.3
+## Dependencies: GMBlueprint
+## SavedVariablesPerCharacter: GMTransportDraft
+TransportModels.lua
+GMTransport.lua
+Announcements.lua

@@ -1,0 +1,7 @@
+{
+  "client": "C:/dev/wowdecomp",
+  "server": "C:/dev/TC/TrinityCore",
+  "server_home": "C:/dev/TC",
+  "game": "C:/Games/WoW335a",
+  "mysql": "C:/Program Files/MySQL/MySQL Server 8.0/bin/mysql.exe"
+}

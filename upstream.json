@@ -1,0 +1,11 @@
+{
+  "client": {
+    "url": "https://github.com/SatyPardus/wowdecomp.git",
+    "commit": "c74494faee3cebeb29843030f61d9204ed35e701"
+  },
+  "server": {
+    "url": "https://github.com/TrinityCore/TrinityCore.git",
+    "commit": "f77768faad1668b73dee05e5ae62740a583cdfed",
+    "branch": "3.3.5"
+  }
+}

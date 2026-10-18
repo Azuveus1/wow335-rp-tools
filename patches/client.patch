@@ -1,0 +1,962 @@
+diff --git a/WoW/Source/Game/ShipPath.cpp b/WoW/Source/Game/ShipPath.cpp
+index 78b2c1b..67b83cc 100644
+--- a/WoW/Source/Game/ShipPath.cpp
++++ b/WoW/Source/Game/ShipPath.cpp
+@@ -26,12 +26,12 @@ ShipPath::ShipPath() {
+ 
+ // VERIFY: 09b64bdb auto
+ // OFFSET: 0x007F92F0
+-void ShipPath::Init(uint32_t taxiPathId, float moveSpeed, float accelRate, const TransportPhysicsRec* physics) {
++void ShipPath::Init(uint32_t taxiPathId, float moveSpeed, float accelRate, const TransportPhysicsRec* physics, const std::vector<TaxiPathNodeRec>* editorNodes) {
+     this->m_moveSpeed = moveSpeed;
+     this->m_taxiPathId = taxiPathId;
+     this->m_totalPathTime = 0;
+     this->m_accelRate = accelRate;
+-    this->BuildLegs();
++    this->BuildLegs(editorNodes);
+     this->m_physics = physics;
+ }
+ 
+@@ -94,7 +94,8 @@ void ShipPathArray<C3Vector>::SetCount(uint32_t count) {
+ 
+ // VERIFY: 7897cce3 manual
+ // OFFSET: 0x007F90F0
+-void ShipPath::BuildLegs() {
++void ShipPath::BuildLegs(const std::vector<TaxiPathNodeRec>* editorNodes) {
++    this->m_legs.SetCount(0);
+     ShipPathArray<C3Vector> points;
+     points.m_data = static_cast<C3Vector*>(alloca(0x3000));
+     points.m_count = 0;
+@@ -107,16 +108,18 @@ void ShipPath::BuildLegs() {
+     this->m_events.m_count = 0;
+     events.m_count = 0;
+     int32_t leg = -1;
+-    int32_t index = FindFirstPathNode(this->m_taxiPathId);
++    int32_t index = editorNodes ? 0 : FindFirstPathNode(this->m_taxiPathId);
++    int32_t nodeCount = editorNodes ? static_cast<int32_t>(editorNodes->size()) : g_taxiPathNodeDB.m_numRecords;
++    const TaxiPathNodeRec* nodeData = editorNodes ? editorNodes->data() : g_taxiPathNodeDB.m_records;
+ 
+-    if (index == -1) {
++    if (index == -1 || nodeCount == 0) {
+         return;
+     }
+ 
+-    TaxiPathNodeRec* node = nullptr;
++    const TaxiPathNodeRec* node = nullptr;
+ 
+-    if (index >= 0 && index < g_taxiPathNodeDB.m_numRecords) {
+-        node = &g_taxiPathNodeDB.m_records[index];
++    if (index >= 0 && index < nodeCount) {
++        node = &nodeData[index];
+     }
+ 
+     int32_t teleport = 0;
+@@ -171,11 +174,11 @@ void ShipPath::BuildLegs() {
+         teleport = node->m_flags & 0x1;
+         index++;
+ 
+-        if (index < 0 || index >= g_taxiPathNodeDB.m_numRecords) {
++        if (index < 0 || index >= nodeCount) {
+             break;
+         }
+ 
+-        node = &g_taxiPathNodeDB.m_records[index];
++        node = &nodeData[index];
+ 
+         if (node->m_pathID != static_cast<int32_t>(this->m_taxiPathId)) {
+             break;
+diff --git a/WoW/Source/Game/ShipPath.h b/WoW/Source/Game/ShipPath.h
+index 3dcb344..e092716 100644
+--- a/WoW/Source/Game/ShipPath.h
++++ b/WoW/Source/Game/ShipPath.h
+@@ -3,6 +3,8 @@
+ 
+ #include <cstddef>
+ #include <cstdint>
++#include <vector>
++class TaxiPathNodeRec;
+ #include "Engine/Source/Storm/H/stpl.h"
+ #include "Engine/Source/Tempest/C3Spline_CatmullRom.h"
+ 
+@@ -64,13 +66,14 @@ class ShipPath {
+     /* 003D */ uint8_t m_waitReached;
+     /* 003E */ uint8_t unk_003E;
+ 
++    uint32_t m_editorRevision = 0;
+     ShipPath();
+     void SetTimeOffsetToPoint(uint32_t time, uint32_t point);
+     void FindLegAndSegment(uint32_t pathTime, uint32_t* leg, uint32_t* segment);
+     void WaitAtNextPausePoint(uint32_t time, bool pause);
+-    void Init(uint32_t taxiPathId, float moveSpeed, float accelRate, const TransportPhysicsRec* physics);
++    void Init(uint32_t taxiPathId, float moveSpeed, float accelRate, const TransportPhysicsRec* physics, const std::vector<TaxiPathNodeRec>* editorNodes = nullptr);
+     void SetTotalPathTime(uint32_t time);
+-    void BuildLegs();
++    void BuildLegs(const std::vector<TaxiPathNodeRec>* editorNodes = nullptr);
+     uint32_t LegTimeAccel(float distance);
+     void BuildLeg(ShipPathArray<C3Vector>* points, ShipPathArray<ShipPathPause>* pauses, ShipPathArray<ShipPathEvent>* events, int32_t leg);
+     void SetTimeOffset(uint32_t time, float progress);
+diff --git a/WoW/Source/Glue/CGlueMgr.cpp b/WoW/Source/Glue/CGlueMgr.cpp
+index 71ccd4d..0c8fd30 100644
+--- a/WoW/Source/Glue/CGlueMgr.cpp
++++ b/WoW/Source/Glue/CGlueMgr.cpp
+@@ -758,6 +758,9 @@ void CGlueMgr::Resume() {
+             }
+ #endif
+ 
++            FrameScript_Execute(
++#include "RoleplayNamesLua.inc"
++                , "RoleplayNamesCreation", nullptr);
+             FrameScript_SignalEvent(GLUE_EVENT_FRAMES_LOADED, nullptr);
+             CGlueMgr::InitializeFFX();
+ 
+diff --git a/WoW/Source/Glue/CharacterCreation.cpp b/WoW/Source/Glue/CharacterCreation.cpp
+index f5af90a..dc7bff4 100644
+--- a/WoW/Source/Glue/CharacterCreation.cpp
++++ b/WoW/Source/Glue/CharacterCreation.cpp
+@@ -1,3 +1,5 @@
++#include "Tools/CivilRegistry/RegistryPolicy.h"
++#include "Tools/RoleplayNames/NameParts.h"
+ #include "CharacterCreation.h"
+ #include <cstring>
+ #include "Engine/Source/Event/Event.h"
+@@ -326,6 +328,14 @@ void CCharacterCreation::CreateCharacter(const char* name) {
+         }
+     }
+ 
++    if (CCharacterCreation::m_existingCharacterIndex < 0) {
++        std::string_view first,last;
++        if (!name || !RoleplayNames::Split(name,first,last)) {
++            FrameScript_SignalEvent(GLUE_EVENT_OPEN_STATUS_DIALOG, "%s%s", "OKAY", FrameScript_GetText("CHAR_NAME_INVALID_SPACE", -1, GENDER_NOT_APPLICABLE));
++            return;
++        }
++    }
++
+     CHARACTER_CREATE_INFO info;
+     SStrCopy(info.m_name, name, sizeof(info.m_name));
+     info.m_raceID = static_cast<uint8_t>(CCharacterCreation::m_character->m_data.m_preferences.m_raceID);
+@@ -442,7 +452,7 @@ void CCharacterCreation::Dress() {
+ 
+                 ItemDisplayInfoRec itemRec;
+                 int32_t found = g_itemDisplayInfoDB.GetRecord(displayID, &itemRec);
+-                int32_t visual = found && g_itemVisualsDB.GetRecord(itemRec.m_itemVisual) ? 0 : itemVisual;
++                int32_t visual = (uint32_t(itemVisual)&0x80000000u) ? 0 : (found && g_itemVisualsDB.GetRecord(itemRec.m_itemVisual) ? 0 : itemVisual);
+ 
+                 if (slot != INVSLOT_MAINHAND && slot != INVSLOT_OFFHAND && slot != INVSLOT_RANGED) {
+                     CCharacterCreation::m_character->AddItemBySlot(static_cast<INVENTORY_SLOTS>(slot), displayID, visual);
+@@ -457,7 +467,10 @@ void CCharacterCreation::Dress() {
+                     int32_t borderColor;
+                     int32_t background;
+ 
+-                    if (GuildGetGuildTabard(display->m_characterInfo.m_guid, display->m_characterInfo.m_guildID, nullptr, nullptr, emblemStyle, emblemColor, borderStyle, borderColor, background)) {
++                    CivilRegistry::Design familyDesign{};
++                if ((uint32_t(itemVisual)&0x80000000u) && CivilRegistry::Unpack(uint32_t(itemVisual)&0xffffffu,familyDesign)) {
++                    CCharacterCreation::m_character->ApplyGuildColor(familyDesign[0],familyDesign[1],familyDesign[2],familyDesign[3],familyDesign[4]);
++                } else if (GuildGetGuildTabard(display->m_characterInfo.m_guid, display->m_characterInfo.m_guildID, nullptr, nullptr, emblemStyle, emblemColor, borderStyle, borderColor, background)) {
+                         CCharacterCreation::m_character->ApplyGuildColor(emblemStyle, emblemColor, borderStyle, borderColor, background);
+                     }
+                 }
+diff --git a/WoW/Source/Glue/CharacterSelection.cpp b/WoW/Source/Glue/CharacterSelection.cpp
+index dc6ac43..e801da6 100644
+--- a/WoW/Source/Glue/CharacterSelection.cpp
++++ b/WoW/Source/Glue/CharacterSelection.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/RegistryPolicy.h"
+ #include "CharacterSelection.h"
+ #include <cstring>
+ #include "Engine/Source/ConsoleBase/ConsoleVar.h"
+@@ -208,7 +209,7 @@ void CCharacterSelection::GuildCallback(int32_t guildID, const WOWGUID& guid, vo
+         int32_t borderColor;
+         int32_t background;
+ 
+-        if (GuildGetGuildTabard(WOWGUID(), guildID, nullptr, nullptr, emblemStyle, emblemColor, borderStyle, borderColor, background)) {
++        if (!(uint32_t(CCharacterSelection::s_characterList[CCharacterSelection::s_selectionIndex].m_characterInfo.m_inventoryItemVisualID[INVSLOT_TABARD])&0x80000000u) && GuildGetGuildTabard(WOWGUID(), guildID, nullptr, nullptr, emblemStyle, emblemColor, borderStyle, borderColor, background)) {
+             CCharacterSelection::s_characterList[CCharacterSelection::s_selectionIndex].m_component->ApplyGuildColor(emblemStyle, emblemColor, borderStyle, borderColor, background);
+         }
+     }
+@@ -492,7 +493,7 @@ void CCharacterSelection::ShowCharacter() {
+ 
+             ItemDisplayInfoRec itemRec;
+             int32_t found = g_itemDisplayInfoDB.GetRecord(displayID, &itemRec);
+-            int32_t visual = found && g_itemVisualsDB.GetRecord(itemRec.m_itemVisual) ? 0 : itemVisual;
++            int32_t visual = (uint32_t(itemVisual)&0x80000000u) ? 0 : (found && g_itemVisualsDB.GetRecord(itemRec.m_itemVisual) ? 0 : itemVisual);
+ 
+             if (slot == INVSLOT_MAINHAND || slot == INVSLOT_OFFHAND || (slot == INVSLOT_RANGED && hunter)) {
+                 if (found) {
+@@ -527,7 +528,10 @@ void CCharacterSelection::ShowCharacter() {
+                 int32_t background;
+                 CHARACTER_INFO& tabardInfo = CCharacterSelection::s_characterList[CCharacterSelection::s_selectionIndex].m_characterInfo;
+ 
+-                if (GuildGetGuildTabard(tabardInfo.m_guid, tabardInfo.m_guildID, &CCharacterSelection::GuildCallback, nullptr, emblemStyle, emblemColor, borderStyle, borderColor, background)) {
++                CivilRegistry::Design familyDesign{};
++                if ((uint32_t(itemVisual)&0x80000000u) && CivilRegistry::Unpack(uint32_t(itemVisual)&0xffffffu,familyDesign)) {
++                    CCharacterSelection::s_characterList[CCharacterSelection::s_selectionIndex].m_component->ApplyGuildColor(familyDesign[0],familyDesign[1],familyDesign[2],familyDesign[3],familyDesign[4]);
++                } else if (GuildGetGuildTabard(tabardInfo.m_guid, tabardInfo.m_guildID, &CCharacterSelection::GuildCallback, nullptr, emblemStyle, emblemColor, borderStyle, borderColor, background)) {
+                     CCharacterSelection::s_characterList[CCharacterSelection::s_selectionIndex].m_component->ApplyGuildColor(emblemStyle, emblemColor, borderStyle, borderColor, background);
+                 }
+             }
+diff --git a/WoW/Source/Object/ObjectClient/Corpse_C.cpp b/WoW/Source/Object/ObjectClient/Corpse_C.cpp
+index 3c1a6ab..e96e916 100644
+--- a/WoW/Source/Object/ObjectClient/Corpse_C.cpp
++++ b/WoW/Source/Object/ObjectClient/Corpse_C.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/RegistryPolicy.h"
+ #include "Corpse_C.h"
+ #include "Engine/Source/Gx/CGxDevice/CGxDevice.h"
+ #include "Engine/Source/Model2/M2Model.h"
+@@ -67,6 +68,11 @@ void CGCorpse_C::ApplyGuildColor(int32_t request) {
+     int32_t borderColor;
+     int32_t background;
+ 
++    CivilRegistry::Design familyDesign{};
++    if ((this->m_corpse->m_corpseFieldGuild&0x80000000u) && CivilRegistry::Unpack(this->m_corpse->m_corpseFieldGuild&0xffffffu,familyDesign)) {
++        this->m_component->ApplyGuildColor(familyDesign[0],familyDesign[1],familyDesign[2],familyDesign[3],familyDesign[4]);
++        return;
++    }
+     if (GuildGetGuildTabard(this->m_corpse->m_corpseFieldOwner, this->m_corpse->m_corpseFieldGuild, nullptr, nullptr, emblemStyle, emblemColor, borderStyle, borderColor, background)) {
+         this->m_component->ApplyGuildColor(emblemStyle, emblemColor, borderStyle, borderColor, background);
+     } else if (request) {
+diff --git a/WoW/Source/Object/ObjectClient/Effect_C.cpp b/WoW/Source/Object/ObjectClient/Effect_C.cpp
+index 3b9a14d..fd12276 100644
+--- a/WoW/Source/Object/ObjectClient/Effect_C.cpp
++++ b/WoW/Source/Object/ObjectClient/Effect_C.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "Effect_C.h"
+ #include <cstring>
+ #include <cmath>
+@@ -637,7 +638,7 @@ void CEffect::ClearLightning() {
+ // VERIFY: 4c42526f auto
+ // OFFSET: 0x006F8600
+ void CEffect::ApplyItemVisualByItemId(int32_t id, const WOWGUID& guid, void* param, bool success) {
+-    ItemRec* item = g_itemDB.GetRecord(id);
++    ItemRec* item = RegistryItemRecord(id);
+ 
+     if (!item) {
+         return;
+diff --git a/WoW/Source/Object/ObjectClient/GameObject_C.cpp b/WoW/Source/Object/ObjectClient/GameObject_C.cpp
+index 0ee37b1..3059825 100644
+--- a/WoW/Source/Object/ObjectClient/GameObject_C.cpp
++++ b/WoW/Source/Object/ObjectClient/GameObject_C.cpp
+@@ -1,3 +1,4 @@
++#include "WoW/Source/Ui/GMTransport.h"
+ #include "GameObject_C.h"
+ #include "WoW/Source/Object/ObjectClient/Item_C.h"
+ #include <cmath>
+@@ -3461,13 +3462,19 @@ void CGGameObject_C_Type_MapObjTransport::UpdateMovement(uint32_t time, uint32_t
+     C3Vector position(0.0f, 0.0f, 0.0f);
+     int32_t mapId = -1;
+     int32_t initial = this->unk_0038 == -1;
++    GMTransportPrepareShip(this->m_owner->m_obj->m_entryID, this->m_shipPath);
+     uint32_t pathTime = this->m_owner->m_transportTimeOffset + time;
+     uint32_t sequence;
+     float facing;
+     uint32_t leg;
+     float roll;
+     float pitch;
+-    this->m_shipPath.GetPosition(pathTime, elapsed, &mapId, &sequence, &position, &facing, &leg, &roll, &pitch, 0);
++    if (GMTransportPosition(this->m_owner->m_obj->m_entryID, pathTime, mapId, position, facing)) {
++        sequence = 0; leg = 0; roll = 0.0f; pitch = 0.0f;
++    } else {
++        if (this->m_owner->m_obj->m_entryID >= 9000000 && this->m_owner->m_obj->m_entryID <= 9999999) return;
++        this->m_shipPath.GetPosition(pathTime, elapsed, &mapId, &sequence, &position, &facing, &leg, &roll, &pitch, 0);
++    }
+ 
+     if (mapId != static_cast<int32_t>(ClntObjMgrGetMapID())) {
+         CGUnit_C* mover = static_cast<CGUnit_C*>(ClntObjMgrObjectPtr(CGUnit_C::s_activeMover, TYPEMASK_UNIT, __FILE__, __LINE__));
+@@ -3559,6 +3566,8 @@ void CGGameObject_C_Type_MapObjTransport::UpdateMovement(uint32_t time, uint32_t
+ // VERIFY: 901b1381 auto
+ // OFFSET: 0x00714240
+ uint32_t CGGameObject_C_Type_MapObjTransport::GetSequenceTimeFromRealTime(uint32_t time) const {
++    int32_t map; C3Vector p; float facing;
++    if (GMTransportPosition(this->m_owner->m_obj->m_entryID, time, map, p, facing)) return time;
+     return this->m_shipPath.GetPathTime(time);
+ }
+ 
+diff --git a/WoW/Source/Object/ObjectClient/Item_C.cpp b/WoW/Source/Object/ObjectClient/Item_C.cpp
+index 057596e..bf51845 100644
+--- a/WoW/Source/Object/ObjectClient/Item_C.cpp
++++ b/WoW/Source/Object/ObjectClient/Item_C.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "Item_C.h"
+ #include "WoW/Source/DB/Rec/ItemVisualsRec.h"
+ #include "WoW/Source/Ui/ItemSocketInfo.h"
+@@ -88,7 +89,7 @@ static int32_t OnUpdateStackCount(WOWGUID guid, uint32_t fieldOffset, uint32_t f
+             CGCurrencyTypes::EnterWorld();
+         }
+ 
+-        ItemRec* rec = g_itemDB.GetRecord(item->m_obj->m_entryID);
++        ItemRec* rec = RegistryItemRecord(item->m_obj->m_entryID);
+ 
+         if (rec && rec->m_inventoryType == 24) {
+             CGCharacterInfo::UpdateInventoryAlerts();
+@@ -290,22 +291,22 @@ CGItem_C::CGItem_C(uint32_t time, const CClientObjCreate& create) : CGObject_C(t
+ 
+     ClntObjMgrHideObject(this->m_obj->m_guid);
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+     this->m_virtualItem.m_classID = rec ? rec->m_classID : 0;
+ 
+-    rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    rec = RegistryItemRecord(this->m_obj->m_entryID);
+     this->m_virtualItem.m_subclassID = rec ? rec->m_subclassID : 0;
+ 
+-    rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    rec = RegistryItemRecord(this->m_obj->m_entryID);
+     this->m_virtualItem.m_material = rec ? rec->m_material : 0;
+ 
+-    rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    rec = RegistryItemRecord(this->m_obj->m_entryID);
+     this->m_virtualItem.m_inventoryType = rec ? rec->m_inventoryType : 0;
+ 
+-    rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    rec = RegistryItemRecord(this->m_obj->m_entryID);
+     this->m_virtualItem.m_sheatheType = rec ? rec->m_sheatheType : 0;
+ 
+-    rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    rec = RegistryItemRecord(this->m_obj->m_entryID);
+     this->m_virtualItem.m_soundOverrideSubclassID = rec ? rec->m_soundOverrideSubclassID : -1;
+ 
+     memset(this->m_enchantmentExpiration, 0, sizeof(this->m_enchantmentExpiration));
+@@ -472,7 +473,7 @@ int32_t CGItem_C::GetSelectionHighlightColor(CImVector* color) const {
+ // VERIFY: 3f2f878c auto
+ // OFFSET: 0x00707220
+ uint32_t CGItem_C::GetClassID() const {
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+ 
+     return rec ? rec->m_classID : 0;
+ }
+@@ -480,7 +481,7 @@ uint32_t CGItem_C::GetClassID() const {
+ // VERIFY: 955a9609 auto
+ // OFFSET: 0x00707250
+ uint32_t CGItem_C::GetSubtypeID() const {
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+ 
+     return rec ? rec->m_subclassID : 0;
+ }
+@@ -488,7 +489,7 @@ uint32_t CGItem_C::GetSubtypeID() const {
+ // VERIFY: 6c114c7d auto
+ // OFFSET: 0x00707280
+ uint32_t CGItem_C::GetInventoryType() const {
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+ 
+     return rec ? rec->m_inventoryType : 0;
+ }
+@@ -496,7 +497,7 @@ uint32_t CGItem_C::GetInventoryType() const {
+ // VERIFY: b59c1299 auto
+ // OFFSET: 0x00707300
+ uint32_t CGItem_C::GetDisplayID() const {
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+ 
+     return rec ? rec->m_displayInfoID : 0;
+ }
+@@ -504,7 +505,7 @@ uint32_t CGItem_C::GetDisplayID() const {
+ // VERIFY: 8c746859 auto
+ // OFFSET: 0x00707330
+ uint32_t CGItem_C::GetSheatheType() const {
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+ 
+     return rec ? rec->m_sheatheType : 0;
+ }
+@@ -541,7 +542,7 @@ bool CGItem_C::HasSoulboundEnchant() {
+ // VERIFY: a5c81637 auto
+ // OFFSET: 0x00707500
+ int32_t CGItem_C::GetRandomItemSlot() const {
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+     uint32_t inventoryType = rec ? rec->m_inventoryType : 0;
+ 
+     switch (inventoryType) {
+@@ -1120,7 +1121,7 @@ const char* CGItem_C::GetInventoryArt(int32_t displayId) {
+ // VERIFY: 3c4650e1 auto
+ // OFFSET: 0x0070AA00
+ const char* CGItem_C::GetInventoryArt() const {
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+ 
+     if (rec) {
+         return CGItem_C::GetInventoryArt(rec->m_displayInfoID);
+@@ -1720,7 +1721,7 @@ int32_t CGItem_C::UseItem(WOWGUID* target, int32_t a2) {
+ // OFFSET: 0x0070AA40
+ void CGItem_C::PostInitWithStats() {
+     this->m_itemFlags |= 2;
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+     this->m_virtualItem.m_classID = rec ? rec->m_classID : 0;
+     this->m_virtualItem.m_subclassID = rec ? rec->m_subclassID : 0;
+     this->m_virtualItem.m_material = rec ? rec->m_material : 0;
+@@ -1796,7 +1797,7 @@ int32_t CGItem_C::CanGoInSlot(int32_t itemId, uint32_t slot, int32_t bypass) {
+         return 0;
+     }
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(itemId);
++    ItemRec* rec = RegistryItemRecord(itemId);
+ 
+     if (!rec) {
+         return 0;
+@@ -1916,7 +1917,7 @@ void CGItem_C::UpdateEnchantments() {
+ // OFFSET: 0x00708040
+ int32_t CGItem_C::GetItemEnchantmentVisualID() const {
+     ItemDisplayInfoRec displayRec;
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_obj->m_entryID);
++    ItemRec* rec = RegistryItemRecord(this->m_obj->m_entryID);
+     int32_t displayId = rec ? rec->m_displayInfoID : 0;
+ 
+     if (!g_itemDisplayInfoDB.GetRecord(displayId, &displayRec)) {
+diff --git a/WoW/Source/Object/ObjectClient/Player_C.cpp b/WoW/Source/Object/ObjectClient/Player_C.cpp
+index 32370f7..bfa5515 100644
+--- a/WoW/Source/Object/ObjectClient/Player_C.cpp
++++ b/WoW/Source/Object/ObjectClient/Player_C.cpp
+@@ -1,3 +1,5 @@
++#include "Tools/CivilRegistry/ClientItems.h"
++#include "Tools/CivilRegistry/RegistryPolicy.h"
+ #include "Player_C.h"
+ #include <malloc.h>
+ #include "Engine/Source/Base/CDataStore.h"
+@@ -2227,7 +2229,7 @@ int32_t CGPlayer_C::GetPVPToggleTimer() const {
+ // OFFSET: 0x006DE7E0
+ uint32_t CGPlayer_C::GetEquippedAmmoDisplayId() const {
+     int32_t ammoId = this->m_obj->m_guid == ClntObjMgrGetActivePlayer() ? this->m_player->m_playerAmmoId : 0;
+-    ItemRec* rec = g_itemDB.GetRecord(ammoId);
++    ItemRec* rec = RegistryItemRecord(ammoId);
+ 
+     return rec ? rec->m_displayInfoID : 0;
+ }
+@@ -10277,7 +10279,7 @@ void CGPlayer_C::UpdateObjComponentVisualsSlot(const VisibleItem_C* item, int32_
+ // OFFSET: 0x006DE7E0
+ uint32_t CGPlayer_C::GetEquippedItemDisplayId() {
+     int32_t ammo = this->m_obj->m_guid == ClntObjMgrGetActivePlayer() ? this->m_player->m_playerAmmoId : 0;
+-    ItemRec* rec = g_itemDB.GetRecord(ammo);
++    ItemRec* rec = RegistryItemRecord(ammo);
+     return rec ? rec->m_displayInfoID : 0;
+ }
+ 
+@@ -10515,6 +10517,12 @@ void CGPlayer_C::UpdateInventoryComponent(INVENTORY_SLOTS slot, const VisibleIte
+     VisibleItem_C* old = const_cast<VisibleItem_C*>(oldItem);
+ 
+     if (abs(old->m_itemId) == abs(item->m_itemId) && (old->m_itemId > 0) == (item->m_itemId > 0)) {
++        // A family design changes the visible enchantment words, not item ID.
++        // UpdateObjComponentVisualsSlot only handles the two weapon slots.
++        if (slot==INVSLOT_TABARD && item->m_itemId==CivilRegistry::Tabard) {
++            this->LoadGuildTextures(item->GetDisplayID());
++            return;
++        }
+         this->UpdateObjComponentVisualsSlot(item, slot);
+         return;
+     }
+@@ -11486,6 +11494,13 @@ bool CGPlayer_C::LoadGuildTextures(int32_t displayId) {
+     }
+ 
+     this->m_characterComponent->AddItemBySlot(INVSLOT_TABARD, displayId, 0);
++    auto const& familyItem=this->m_player->m_playerVisibleItems[INVSLOT_TABARD];
++    CivilRegistry::Design familyDesign{};
++    if (familyItem.m_itemId==CivilRegistry::Tabard && CivilRegistry::Decode(familyItem.m_enchantment[0],familyItem.m_enchantment[1],familyDesign)) {
++        this->m_characterComponent->ApplyGuildColor(familyDesign[0],familyDesign[1],familyDesign[2],familyDesign[3],familyDesign[4]);
++        return true;
++    }
++
+ 
+     if (rec.m_flags & 0x1) {
+         int32_t emblemStyle;
+@@ -13943,6 +13958,10 @@ void CGPlayer_C::TabardDrawCallback(int32_t guildID, const WOWGUID& guid, void*
+     int32_t borderColor;
+     int32_t background;
+ 
++    if (player->m_player->m_playerVisibleItems[INVSLOT_TABARD].m_itemId==CivilRegistry::Tabard) {
++        player->LoadGuildTextures(player->m_player->m_playerVisibleItems[INVSLOT_TABARD].GetDisplayID());
++        return;
++    }
+     if (GuildGetGuildTabard(guid, guildID, nullptr, nullptr, emblemStyle, emblemColor, borderStyle, borderColor, background) && player->m_characterComponent) {
+         player->m_characterComponent->ApplyGuildColor(emblemStyle, emblemColor, borderStyle, borderColor, background);
+     }
+diff --git a/WoW/Source/Object/ObjectClient/Unit_C.cpp b/WoW/Source/Object/ObjectClient/Unit_C.cpp
+index 95a755b..f1404ff 100644
+--- a/WoW/Source/Object/ObjectClient/Unit_C.cpp
++++ b/WoW/Source/Object/ObjectClient/Unit_C.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "Unit_C.h"
+ #include <cmath>
+ #include <new>
+@@ -9623,7 +9624,7 @@ CGUnit_C::CGUnit_C(uint32_t time, const CClientObjCreate& create)
+     this->InitPredictedPower();
+ 
+     for (int32_t i = 0; i < 3; i++) {
+-        ItemRec* rec = g_itemDB.GetRecord(this->m_unit->m_unitVirtualItemSlotId[i]);
++        ItemRec* rec = RegistryItemRecord(this->m_unit->m_unitVirtualItemSlotId[i]);
+         CGUnitVirtualItem item;
+ 
+         if (rec) {
+@@ -10100,7 +10101,7 @@ void CGUnit_C::Reenable() {
+     this->ShowLootEffect();
+ 
+     for (int32_t i = 0; i < 3; i++) {
+-        ItemRec* rec = g_itemDB.GetRecord(this->m_unit->m_unitVirtualItemSlotId[i]);
++        ItemRec* rec = RegistryItemRecord(this->m_unit->m_unitVirtualItemSlotId[i]);
+         CGUnitVirtualItem item;
+ 
+         if (rec) {
+@@ -21817,8 +21818,8 @@ UnitBloodRec* CGUnit_C::GetBloodRecord() {
+ // VERIFY: ce51319d auto
+ // OFFSET: 0x00725010
+ void CGUnit_C::OnVirtualItemChanged(uint32_t slot, int32_t oldItemId) {
+-    ItemRec* oldRec = g_itemDB.GetRecord(oldItemId);
+-    ItemRec* rec = g_itemDB.GetRecord(this->m_unit->m_unitVirtualItemSlotId[slot]);
++    ItemRec* oldRec = RegistryItemRecord(oldItemId);
++    ItemRec* rec = RegistryItemRecord(this->m_unit->m_unitVirtualItemSlotId[slot]);
+     this->m_virtualItemDisplayId[slot] = rec ? rec->m_displayInfoID : 0;
+     CGUnitVirtualItem item;
+     item.m_pad[0] = 0;
+diff --git a/WoW/Source/Object/ObjectClient/VisibleItem_C.cpp b/WoW/Source/Object/ObjectClient/VisibleItem_C.cpp
+index 08c2885..33fbbb1 100644
+--- a/WoW/Source/Object/ObjectClient/VisibleItem_C.cpp
++++ b/WoW/Source/Object/ObjectClient/VisibleItem_C.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "VisibleItem_C.h"
+ #include <cstdlib>
+ #include "WoW/Source/DB/DBClient/DBCacheInstances.h"
+@@ -41,7 +42,7 @@ uint32_t VisibleItem_C::GetInventoryType() {
+         return stats->m_inventoryType;
+     }
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(abs(this->m_itemId));
++    ItemRec* rec = RegistryItemRecord(abs(this->m_itemId));
+     return rec ? rec->m_inventoryType : 0;
+ }
+ 
+@@ -55,7 +56,7 @@ uint32_t VisibleItem_C::GetDisplayID() {
+         return stats->m_displayId;
+     }
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(abs(this->m_itemId));
++    ItemRec* rec = RegistryItemRecord(abs(this->m_itemId));
+     return rec ? rec->m_displayInfoID : 0;
+ }
+ 
+@@ -69,7 +70,7 @@ uint32_t VisibleItem_C::GetMaterial() {
+         return stats->m_material;
+     }
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(abs(this->m_itemId));
++    ItemRec* rec = RegistryItemRecord(abs(this->m_itemId));
+     return rec ? rec->m_material : 0;
+ }
+ 
+@@ -83,7 +84,7 @@ uint32_t VisibleItem_C::GetSheatheType() {
+         return stats->m_sheatheType;
+     }
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(abs(this->m_itemId));
++    ItemRec* rec = RegistryItemRecord(abs(this->m_itemId));
+     return rec ? rec->m_sheatheType : 0;
+ }
+ 
+@@ -97,7 +98,7 @@ uint32_t VisibleItem_C::GetSoundOverrideSubclassID() {
+         return stats->m_soundOverrideSubclass;
+     }
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(abs(this->m_itemId));
++    ItemRec* rec = RegistryItemRecord(abs(this->m_itemId));
+     return rec ? rec->m_soundOverrideSubclassID : 0;
+ }
+ 
+diff --git a/WoW/Source/Ui/ActionBarFrame.cpp b/WoW/Source/Ui/ActionBarFrame.cpp
+index e533d6c..ccb5073 100644
+--- a/WoW/Source/Ui/ActionBarFrame.cpp
++++ b/WoW/Source/Ui/ActionBarFrame.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "ActionBarFrame.h"
+ #include "Engine/Source/Base/CDataStore.h"
+ #include "Engine/Source/ConsoleBase/ConsoleVar.h"
+@@ -812,7 +813,7 @@ const char* CGActionBar::GetTexture(int32_t slot) {
+     }
+ 
+     if (CGActionBar::IsItem(slot)) {
+-        ItemRec* item = g_itemDB.GetRecord(CGActionBar::GetItem(slot));
++        ItemRec* item = RegistryItemRecord(CGActionBar::GetItem(slot));
+         int32_t displayId = item ? item->m_displayInfoID : 0;
+         SStrPrintf(s_texture, sizeof(s_texture), "%s%s%s", s_iconPath, *s_iconPath ? "\\" : "", CGItem_C::GetInventoryArt(displayId));
+         return s_texture;
+@@ -1129,7 +1130,7 @@ void CGActionBar::PutActionInSlot(int32_t slot) {
+         }
+ 
+         if (CGActionBar::IsItem(slot)) {
+-            ItemRec* rec = g_itemDB.GetRecord(CGActionBar::GetItem(slot));
++            ItemRec* rec = RegistryItemRecord(CGActionBar::GetItem(slot));
+             CGGameUI::SetCursorVirtualItem(CGActionBar::GetItem(slot), rec ? rec->m_displayInfoID : 0, slot, 7, 0);
+         } else if (CGActionBar::IsSpell(slot)) {
+             int32_t spellId = CGActionBar::GetSpell(slot, petSpell);
+@@ -1161,7 +1162,7 @@ void CGActionBar::PutActionInSlot(int32_t slot) {
+             return;
+         }
+ 
+-        ItemRec* itemRec = g_itemDB.GetRecord(itemId);
++        ItemRec* itemRec = RegistryItemRecord(itemId);
+ 
+         if (!itemRec) {
+             return;
+@@ -1181,7 +1182,7 @@ void CGActionBar::PutActionInSlot(int32_t slot) {
+                 return;
+             }
+ 
+-            ItemRec* rec = g_itemDB.GetRecord(slotItem);
++            ItemRec* rec = RegistryItemRecord(slotItem);
+             CGGameUI::SetCursorVirtualItem(slotItem, rec ? rec->m_displayInfoID : 0, slot, 7, 0);
+         } else if (CGActionBar::IsSpell(slot)) {
+             CGGameUI::SetCursorSpell(CGActionBar::GetSpell(slot, petSpell));
+@@ -1203,7 +1204,7 @@ void CGActionBar::PutActionInSlot(int32_t slot) {
+         action = itemId | 0x80000000;
+     } else if (cursorMacro) {
+         if (CGActionBar::IsItem(slot)) {
+-            ItemRec* rec = g_itemDB.GetRecord(CGActionBar::GetItem(slot));
++            ItemRec* rec = RegistryItemRecord(CGActionBar::GetItem(slot));
+             CGGameUI::SetCursorVirtualItem(CGActionBar::GetItem(slot), rec ? rec->m_displayInfoID : 0, slot, 7, 0);
+         } else if (CGActionBar::IsSpell(slot)) {
+             CGGameUI::SetCursorSpell(CGActionBar::GetSpell(slot, petSpell));
+@@ -1236,7 +1237,7 @@ void CGActionBar::PutActionInSlot(int32_t slot) {
+         }
+ 
+         if (CGActionBar::IsItem(slot)) {
+-            ItemRec* rec = g_itemDB.GetRecord(CGActionBar::GetItem(slot));
++            ItemRec* rec = RegistryItemRecord(CGActionBar::GetItem(slot));
+             CGGameUI::SetCursorVirtualItem(CGActionBar::GetItem(slot), rec ? rec->m_displayInfoID : 0, slot, 7, 0);
+         } else if (CGActionBar::IsSpell(slot)) {
+             CGGameUI::SetCursorSpell(CGActionBar::GetSpell(slot, petSpell));
+@@ -1330,7 +1331,7 @@ void CGActionBar::UseAction(int32_t slot, const WOWGUID& target, const char* but
+         }
+ 
+         int32_t itemId = CGActionBar::GetItem(slot);
+-        ItemRec* rec = g_itemDB.GetRecord(itemId);
++        ItemRec* rec = RegistryItemRecord(itemId);
+ 
+         if (!rec) {
+             return;
+@@ -1510,7 +1511,7 @@ int32_t CGActionBar::IsEquippedAction(uint32_t slot) {
+     }
+ 
+     int32_t itemId = CGActionBar::GetItem(slot);
+-    ItemRec* item = g_itemDB.GetRecord(itemId);
++    ItemRec* item = RegistryItemRecord(itemId);
+ 
+     if (!item || !item->m_inventoryType) {
+         return 0;
+@@ -2016,7 +2017,7 @@ void CGActionBar::PickupAction(uint32_t slot) {
+     }
+ 
+     if (CGActionBar::IsItem(slot)) {
+-        ItemRec* rec = g_itemDB.GetRecord(CGActionBar::GetItem(slot));
++        ItemRec* rec = RegistryItemRecord(CGActionBar::GetItem(slot));
+         int32_t displayId = rec ? rec->m_displayInfoID : 0;
+         CGGameUI::SetCursorVirtualItem(CGActionBar::GetItem(slot), displayId, slot, 7, 0);
+         CGActionBar::RemoveAction(slot);
+diff --git a/WoW/Source/Ui/ClassTrainerFrame_Scripts.cpp b/WoW/Source/Ui/ClassTrainerFrame_Scripts.cpp
+index 276c07c..dd88f0f 100644
+--- a/WoW/Source/Ui/ClassTrainerFrame_Scripts.cpp
++++ b/WoW/Source/Ui/ClassTrainerFrame_Scripts.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "ClassTrainerFrame.h"
+ #include <cstdint>
+ #include "Engine/Source/FrameScript/FrameScript.h"
+@@ -402,7 +403,7 @@ static int32_t Script_GetTrainerServiceIcon(lua_State* L) {
+ 
+     ItemRec* item;
+ 
+-    if (CGClassTrainer::m_trainerType == 2 && (spell.m_effect[0] == 24 || spell.m_effect[0] == 157 || spell.m_effect[0] == 59) && (item = g_itemDB.GetRecord(spell.m_effectItemType[0]))) {
++    if (CGClassTrainer::m_trainerType == 2 && (spell.m_effect[0] == 24 || spell.m_effect[0] == 157 || spell.m_effect[0] == 59) && (item = RegistryItemRecord(spell.m_effectItemType[0]))) {
+         const char* path = ClientDBStringLookup(3);
+         char texture[260];
+         SStrPrintf(texture, sizeof(texture), "%s%s%s", path, *path ? "\\" : "", CGItem_C::GetInventoryArt(item->m_displayInfoID));
+diff --git a/WoW/Source/Ui/ContainerFrame.cpp b/WoW/Source/Ui/ContainerFrame.cpp
+index 26cd77f..2d189bc 100644
+--- a/WoW/Source/Ui/ContainerFrame.cpp
++++ b/WoW/Source/Ui/ContainerFrame.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "ContainerFrame.h"
+ #include "Engine/Source/FrameScript/FrameScript.h"
+ #include "Engine/Source/lua-5.1/src/lua.h"
+@@ -291,7 +292,7 @@ int32_t UpdateContainerContents(WOWGUID guid, uint32_t fieldOffset, uint32_t fie
+     CGGameUI::UnlockItem(newGuid);
+ 
+     if (CGGameUI::m_autoStoreItem == oldGuid || CGGameUI::m_autoStoreItem == newGuid || (!CGGameUI::m_autoStoreItem && CGGameUI::m_autoStoreItemID)) {
+-        ItemRec* item = g_itemDB.GetRecord(CGGameUI::m_autoStoreItemID);
++        ItemRec* item = RegistryItemRecord(CGGameUI::m_autoStoreItemID);
+ 
+         if (item) {
+             SI2::PlayItemSound(1, item->m_displayInfoID);
+@@ -344,7 +345,7 @@ int32_t UpdateInvContents(WOWGUID guid, uint32_t fieldOffset, uint32_t fieldSize
+     CGGameUI::UnlockItem(newGuid);
+ 
+     if (CGGameUI::m_autoStoreItem == oldGuid || CGGameUI::m_autoStoreItem == newGuid || (!CGGameUI::m_autoStoreItem && CGGameUI::m_autoStoreItemID)) {
+-        ItemRec* item = g_itemDB.GetRecord(CGGameUI::m_autoStoreItemID);
++        ItemRec* item = RegistryItemRecord(CGGameUI::m_autoStoreItemID);
+ 
+         if (item) {
+             SI2::PlayItemSound(1, item->m_displayInfoID);
+diff --git a/WoW/Source/Ui/ContainerFrame_Scripts.cpp b/WoW/Source/Ui/ContainerFrame_Scripts.cpp
+index 8aca2df..cef0e5b 100644
+--- a/WoW/Source/Ui/ContainerFrame_Scripts.cpp
++++ b/WoW/Source/Ui/ContainerFrame_Scripts.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "ContainerFrame.h"
+ #include <cstdint>
+ #include "Engine/Source/FrameScript/FrameScript.h"
+@@ -854,7 +855,7 @@ static bool BuildItemIconPath(int32_t itemId, char* buffer, uint32_t size) {
+         return false;
+     }
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(itemId);
++    ItemRec* rec = RegistryItemRecord(itemId);
+ 
+     if (!rec) {
+         return false;
+diff --git a/WoW/Source/Ui/GameUI.cpp b/WoW/Source/Ui/GameUI.cpp
+index 48e1114..abe36dc 100644
+--- a/WoW/Source/Ui/GameUI.cpp
++++ b/WoW/Source/Ui/GameUI.cpp
+@@ -1,4 +1,5 @@
+ #include "GameUI.h"
++#include "GMBlueprint.h"
+ #include "WoW/Source/DB/Rec/FileDataRec.h"
+ #include "WoW/Source/DB/Rec/MovieFileDataRec.h"
+ #include "WoW/Source/DB/Rec/MovieRec.h"
+@@ -7860,6 +7861,14 @@ void CGGameUI::InvalidatePlayer(const WOWGUID& guid) {
+     CGGuildInfo::InvalidatePlayer(guid);
+     CGCalendar::InvalidatePlayer(guid);
+     CGAutoCompleteName::RefreshName(guid);
++
++    // Invalidation clears the name cache, but existing world text and unit
++    // frames keep their rendered name. Refresh only loaded players and wait
++    // for the new server response before regenerating those displays.
++    if (ClntObjMgrObjectPtr(guid, TYPEMASK_PLAYER, __FILE__, __LINE__)) {
++        auto name = g_nameDBCache.GetRecord(guid.m_guid, guid, NameQueryCallback, nullptr, true);
++        if (name) NameQueryCallback(0, guid, nullptr, true);
++    }
+ }
+ 
+ // VERIFY: f161456e auto
+@@ -8107,6 +8116,7 @@ void CCapturePointUIManager::DeleteNode(CapturePointUIManagerNode* node) {
+ // VERIFY: 1c2e47fb auto
+ // OFFSET: 0x00528C30
+ void CGGameUI::LeaveWorld() {
++    GMBlueprintCancel();
+     if (!CGGameUI::s_inWorld) {
+         return;
+     }
+diff --git a/WoW/Source/Ui/GameUI_Scripts.cpp b/WoW/Source/Ui/GameUI_Scripts.cpp
+index 76a84d4..5112bf4 100644
+--- a/WoW/Source/Ui/GameUI_Scripts.cpp
++++ b/WoW/Source/Ui/GameUI_Scripts.cpp
+@@ -1,4 +1,6 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "GameUI.h"
++#include "GMBlueprint.h"
+ #include <cmath>
+ #include <cstdarg>
+ #include <cstring>
+@@ -4157,7 +4159,7 @@ static int32_t Script_GetItemIcon(lua_State* L) {
+         itemId = GetItemIDByName(lua_tolstring(L, 1, nullptr));
+     }
+ 
+-    ItemRec* item = g_itemDB.GetRecord(itemId);
++    ItemRec* item = RegistryItemRecord(itemId);
+ 
+     if (!item) {
+         return 0;
+@@ -5717,7 +5719,7 @@ static int32_t Script_PickupItem(lua_State* L) {
+         itemId = GetItemIDByName(lua_tolstring(L, 1, nullptr));
+     }
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(itemId);
++    ItemRec* rec = RegistryItemRecord(itemId);
+     int32_t displayId = rec ? rec->m_displayInfoID : 0;
+     CGGameUI::SetCursorVirtualItem(itemId, displayId, 0, 7, 0);
+     return 0;
+@@ -6488,6 +6490,7 @@ static FrameScript_Method s_ScriptFunctions[] = {
+ // VERIFY: 2d4b8add manual
+ // OFFSET: 0x005120E0
+ void LoadScriptFunctions() {
++    GMBlueprintRegisterScriptFunctions();
+     RegisterSimpleFrameScriptMethods();
+     CGTooltip::CreateScriptMetaTable();
+     CGCooldown::CreateScriptMetaTable();
+@@ -6570,6 +6573,7 @@ void LoadScriptFunctions() {
+ // VERIFY: ce499890 manual
+ // OFFSET: 0x00512280
+ void UnloadScriptFunctions() {
++    GMBlueprintUnregisterScriptFunctions();
+     UnregisterSimpleFrameScriptMethods();
+     CGTooltip::DestroyScriptMetaTable();
+     CGCooldown::DestroyScriptMetaTable();
+diff --git a/WoW/Source/Ui/GuildBankFrame_Scripts.cpp b/WoW/Source/Ui/GuildBankFrame_Scripts.cpp
+index 2cdb0e6..7a3514e 100644
+--- a/WoW/Source/Ui/GuildBankFrame_Scripts.cpp
++++ b/WoW/Source/Ui/GuildBankFrame_Scripts.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "GuildBankFrame.h"
+ #include <cstdint>
+ #include "Engine/Source/FrameScript/FrameScript.h"
+@@ -346,7 +347,7 @@ static int32_t Script_GetGuildBankItemInfo(lua_State* L) {
+     GuildBankSlotInfo* info;
+     ItemRec* rec;
+ 
+-    if (tab < 6 && slot < CGGuildBankInfo::m_tabSlots[tabByte].m_count && (info = &CGGuildBankInfo::m_tabSlots[tab].m_data[slot])->m_itemID && info && ClntObjMgrGetActivePlayerObj() && (rec = g_itemDB.GetRecord(info->m_itemID))) {
++    if (tab < 6 && slot < CGGuildBankInfo::m_tabSlots[tabByte].m_count && (info = &CGGuildBankInfo::m_tabSlots[tab].m_data[slot])->m_itemID && info && ClntObjMgrGetActivePlayerObj() && (rec = RegistryItemRecord(info->m_itemID))) {
+         const char* path = ClientDBStringLookup(3);
+         char texture[260];
+         SStrPrintf(texture, sizeof(texture), "%s%s%s", path, *path ? "\\" : "", CGItem_C::GetInventoryArt(rec->m_displayInfoID));
+@@ -418,7 +419,7 @@ static int32_t Script_PickupGuildBankItem(lua_State* L) {
+         Spell_C_StopTargeting();
+     }
+ 
+-    ItemRec* rec = g_itemDB.GetRecord(info->m_itemID);
++    ItemRec* rec = RegistryItemRecord(info->m_itemID);
+ 
+     if (rec) {
+         uint32_t bankSlot = slot + 98 * tab;
+diff --git a/WoW/Source/Ui/QuestTextParser.cpp b/WoW/Source/Ui/QuestTextParser.cpp
+index 62dcea7..0f31f3a 100644
+--- a/WoW/Source/Ui/QuestTextParser.cpp
++++ b/WoW/Source/Ui/QuestTextParser.cpp
+@@ -1,4 +1,6 @@
+ #include "QuestTextParser.h"
++#include "Tools/RoleplayNames/DialogueNames.h"
++#include <string>
+ #include "Engine/Source/FrameScript/FrameScript.h"
+ #include "Engine/Source/Storm/H/storm.h"
+ #include "Engine/Source/Tempest/CMath.h"
+@@ -1301,6 +1303,22 @@ bool QuestParserParseToken(char* buffer, uint32_t size, const NameCache* record,
+             ParseCountDownTimerText(buffer, size, GetWorldState(SStrToInt(number)));
+             break;
+ 
++        case 'P':
++        case 'p':
++        case 'F':
++        case 'f': {
++            const char* full = name ? name : unit
++                ? const_cast<CGUnit_C*>(unit)->GetUnitName(nullptr, 1)
++                : record ? record->m_name : nullptr;
++            if (!full) {
++                return false;
++            }
++            bool playerName = !unit || (unit->m_obj->m_type & TYPEMASK_PLAYER);
++            std::string part(RoleplayNames::DialogueName(full, token, playerName));
++            SStrPack(buffer, part.c_str(), size);
++            break;
++        }
++
+         case 'N':
+         case 'n':
+             if (!unit && !record) {
+diff --git a/WoW/Source/Ui/TabardModelFrame_Scripts.cpp b/WoW/Source/Ui/TabardModelFrame_Scripts.cpp
+index a008cd2..258f097 100644
+--- a/WoW/Source/Ui/TabardModelFrame_Scripts.cpp
++++ b/WoW/Source/Ui/TabardModelFrame_Scripts.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/RegistryPolicy.h"
+ #include "TabardModelFrame.h"
+ #include <cstdint>
+ #include "Engine/Source/FrameScript/FrameScript.h"
+@@ -245,7 +246,28 @@ static int32_t Script_GetLowerEmblemTexture(lua_State* L) {
+ }
+ 
+ // STATIC: 0x00ACF588
++// Family editor stores its own palette; it never calls the guild purchase API.
++static int32_t Script_FamilyDesign(lua_State* L) {
++    auto frame=static_cast<CGTabardModelFrame*>(FrameScript_GetObjectThis(L,CGTabardModelFrame::GetObjectType()));
++    CivilRegistry::Design d{};
++    if (lua_gettop(L)>1) {
++        for(int i=0;i<5;++i)d[i]=int(luaL_checkinteger(L,i+2));
++        if(!CivilRegistry::Valid(d))return luaL_error(L,"Invalid family design");
++        for(int i=0;i<5;++i)frame->m_variations[i]=d[i];
++    }
++    for(int i=0;i<5;++i)lua_pushinteger(L,frame->m_variations[i]);
++    return 5;
++}
++static int32_t Script_FamilyBorder(lua_State* L) {
++    auto frame=static_cast<CGTabardModelFrame*>(FrameScript_GetObjectThis(L,CGTabardModelFrame::GetObjectType()));
++    char file[260];
++    CCharacterComponent::GetTabardBorderFileName(lua_toboolean(L,2)?SECTION_TORSO_UPPER:SECTION_TORSO_LOWER,frame->m_variations[2],frame->m_variations[3],file,sizeof(file));
++    lua_pushstring(L,file);return 1;
++}
++
+ static FrameScript_Method s_ScriptMethods[] = {
++    { "FamilyDesign", &Script_FamilyDesign },
++    { "FamilyBorder", &Script_FamilyBorder },
+     { "InitializeTabardColors", &Script_InitializeTabardColors },
+     { "Save", &Script_Save },
+     { "CycleVariation", &Script_CycleVariation },
+diff --git a/WoW/Source/Ui/TradeSkillFrame_Scripts.cpp b/WoW/Source/Ui/TradeSkillFrame_Scripts.cpp
+index 7ad7c2f..8d7fc33 100644
+--- a/WoW/Source/Ui/TradeSkillFrame_Scripts.cpp
++++ b/WoW/Source/Ui/TradeSkillFrame_Scripts.cpp
+@@ -1,3 +1,4 @@
++#include "Tools/CivilRegistry/ClientItems.h"
+ #include "TradeSkillFrame.h"
+ #include <cstdint>
+ #include "Engine/Source/FrameScript/FrameScript.h"
+@@ -393,7 +394,7 @@ static int32_t Script_GetTradeSkillIcon(lua_State* L) {
+ 
+         if (g_spellDB.GetRecord(info->m_spellId, &spell)) {
+             if ((spell.m_effect[0] == 24 || spell.m_effect[0] == 157 || spell.m_effect[0] == 59) && spell.m_effectItemType[0]) {
+-                ItemRec* item = g_itemDB.GetRecord(spell.m_effectItemType[0]);
++                ItemRec* item = RegistryItemRecord(spell.m_effectItemType[0]);
+ 
+                 if (item) {
+                     const char* path = ClientDBStringLookup(3);
+diff --git a/WoW/Source/WorldClient/Map.cpp b/WoW/Source/WorldClient/Map.cpp
+index a2b8f1a..fc76d40 100644
+--- a/WoW/Source/WorldClient/Map.cpp
++++ b/WoW/Source/WorldClient/Map.cpp
+@@ -1,4 +1,5 @@
+ #include "Map.h"
++#include "WoW/Source/Ui/GMBlueprint.h"
+ #include "Engine/Source/ShaderEffect/ShadowCache.h"
+ #if defined(_MSC_VER)
+ #include <malloc.h>
+@@ -5898,6 +5899,8 @@ void CMap::RenderFootprints() {
+ // VERIFY: 331b297f manual
+ // OFFSET: 0x007C3830
+ void CMap::Unload() {
++    // Editor previews must release their world objects before map teardown.
++    GMBlueprintCancel();
+     CMap::PurgeMaps();
+     CMap::s_lowDetail.Unload();
+ 
+diff --git a/WoW/Source/WowSvcs/WowSvcsClient/ClientServices.cpp b/WoW/Source/WowSvcs/WowSvcsClient/ClientServices.cpp
+index 5842025..c986130 100644
+--- a/WoW/Source/WowSvcs/WowSvcsClient/ClientServices.cpp
++++ b/WoW/Source/WowSvcs/WowSvcsClient/ClientServices.cpp
+@@ -1,3 +1,5 @@
++#include <string>
++#include "Tools/RoleplayNames/NameParts.h"
+ #include <cstdint>
+ #include <cstring>
+ #include "ClientServices.h"
+@@ -577,7 +579,14 @@ const char* ClientServices::GetErrorToken(int32_t errorCode) {
+ // VERIFY: c031479f auto
+ // OFFSET: 0x006B0F90
+ int32_t ClientServices::CharacterValidateName(const char* name) {
+-    return ValidateCharacterNameConst(s_locale, name, true, true, true, true, 0) + 87;
++    if (!name) return CHAR_NAME_NO_NAME;
++    std::string_view first,last,full(name);
++    if (full.find(' ') == std::string_view::npos)
++        return ValidateCharacterNameConst(s_locale, name, true, true, true, true, 0) + 87;
++    if (!RoleplayNames::Split(full,first,last)) return CHAR_NAME_INVALID_SPACE;
++    std::string a(first),b(last);
++    int result=ValidateCharacterNameConst(s_locale,a.c_str(),true,true,true,true,0)+87;
++    return result==CHAR_NAME_SUCCESS ? ValidateCharacterNameConst(s_locale,b.c_str(),true,true,true,true,0)+87 : result;
+ }
+ 
+ // VERIFY: ca1062a6 auto

@@ -1,0 +1,6 @@
+## Interface: 30300
+## Title: Hunter Contracts
+## Notes: Contrats de mercenaires depuis le panneau en jeu
+## Author: Local
+## Version: 1.0
+HunterContracts.lua

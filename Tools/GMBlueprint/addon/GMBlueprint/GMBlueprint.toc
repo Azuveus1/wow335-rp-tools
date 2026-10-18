@@ -1,0 +1,10 @@
+## Interface: 30300
+## Title: GM Blueprint
+## Notes: Placement visuel des GameObjects avec le client wowdecomp et TrinityCore.
+## Author: Local tools
+## Version: 1.3
+## SavedVariables: GMBlueprintSettings
+Locales.lua
+GMBlueprint.lua
+CatalogData.lua
+Catalog.lua

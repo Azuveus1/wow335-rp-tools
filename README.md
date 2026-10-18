@@ -2,6 +2,8 @@
 
 Sources des extensions développées pour un environnement local **TrinityCore 3.3.5 + wowdecomp x64**, destinées à la revue, aux essais et aux contributions. Ce dépôt contient les ajouts, les correctifs d'intégration et les tests ; les deux projets d'origine sont à récupérer séparément.
 
+**Licence de nos ajouts originaux : GPL-2.0-or-later.** Les sources préexistantes conservent leurs notices. Le statut de licence du client amont doit encore être clarifié : cette publication ne présente donc pas l'ensemble client et dépendances comme intégralement sous licence libre. Voir [LICENSE](LICENSE) et [NOTICE.md](NOTICE.md).
+
 | Module | Fonction |
 | --- | --- |
 | GMBlueprint | Placement de décors en aperçu fantôme, catalogue FR/EN, recherche, gizmos de déplacement et de rotation, validation persistante côté serveur. |
